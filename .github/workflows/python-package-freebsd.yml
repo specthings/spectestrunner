@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: BSD-2-Clause
+
+# Copyright (C) 2026 embedded brains GmbH & Co. KG
+
+name: Python package on FreeBSD
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+    steps:
+    - uses: actions/checkout@v6
+    - name: Make
+      uses: vmactions/freebsd-vm@v1
+      with:
+        run: |
+          pkg install -y python3
+          pkg install -y py311-sqlite3
+          pkg install -y uv
+          pkg install -y gmake
+          gmake

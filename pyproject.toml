@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: BSD-2-Clause
+
+# Copyright (C) 2026 embedded brains GmbH & Co. KG
+
+[project]
+name = "spectestrunner"
+version = "0.9.0.dev1"
+description = "Provides a client and sever to run test executables."
+authors = [
+    {name = "The spectestrunner Authors", email = "specthings@embedded-brains.de"}
+]
+license = "BSD-2-Clause"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "grpcio >=1.70.0",
+    "grpcio-tools >=1.70.0",
+    "lauterbach-trace32-rcl >=1.1.1",
+    "libscrc >=1.8.1",
+    "protobuf (>=5.29.0,<6.0.0)",
+    "psutil >=6.1.1",
+    "pyelftools >=0.32",
+    "pyserial >=3.5",
+    "specitems >=1.1.14",
+    "tftpy >=0.8.2"
+]
+keywords = [
+  "certification",
+  "documentation",
+  "markdown",
+  "qualification",
+  "requirements-management",
+  "traceability",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
+
+[project.urls]
+"Source Code" = "https://github.com/specthings/spectestrunner"
+"Bug Tracker" = "https://github.com/specthings/spectestrunner/issues"
+
+[project.scripts]
+spectestaction = "spectestrunner.cliaction:cliaction"
+spectestdescribetarget = "spectestrunner.clidescribetarget:clidescribetarget"
+spectestio = "spectestrunner.cliio:cliio"
+spectestlog = "spectestrunner.clilog:clilog"
+spectestrun = "spectestrunner.clirun:clirun"
+
+[build-system]
+requires = ["uv_build>=0.10.0,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "coverage>=7.13.3",
+    "flake8>=7.3.0",
+    "grpc-stubs>=1.53.0.5",
+    "mypy>=1.19.1",
+    "pylint>=4.0.4",
+    "pytest-cov>=7.0.0",
+    "pytest-xdist>=3.8.0",
+    "pytest>=9.0.2",
+    "sphinx-autodoc-napoleon-typehints>=2.1.6",
+    "sphinx-autodoc-typehints>=3.6.1",
+    "sphinx-rtd-theme>=3.1.0",
+    "sphinx>=9.0.4",
+    "types-protobuf>=6.30.2.20250703",
+    "types-psutil>=6.1.0.20241221",
+    "types-pyyaml>=6.0.12.20241230",
+    "types-pyyaml>=6.0.12.20250915",
+    "yapf>=0.43.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "--cov=spectestrunner --cov-fail-under=80 --cov-branch --cov-report=term-missing --cov-config=.coveragerc"

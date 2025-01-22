@@ -1,0 +1,5 @@
+[run]
+branch = True
+concurrency = multiprocessing,thread
+omit = src/spectestrunner/servicegrpc_pb2*,tests/*
+parallel = True

@@ -1,0 +1,90 @@
+// SPDX-License-Identifier: BSD-2-Clause
+
+// Copyright (C) 2024, 2025 embedded brains GmbH & Co. KG
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+// AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
+
+syntax = "proto3";
+
+message GRPCActionRequest {
+  string uid = 1;
+  string action = 2;
+}
+
+message GRPCActionResponse {
+  string uid = 1;
+  string action = 2;
+  string status = 3;
+}
+
+message GRPCDescribeTargetRequest {
+  string target_id = 1;
+}
+
+message GRPCDescribeTargetResponse {
+  string target_id = 1;
+  string description = 2;
+}
+
+message GRPCInputRequest {
+  string uid = 1;
+}
+
+message GRPCInputResponse {
+  string uid = 1;
+  bytes data = 2;
+}
+
+message GRPCLogRequest {
+  string logger_name = 1;
+}
+
+message GRPCLogResponse {
+  string data = 1;
+}
+
+message GRPCRunImageRequest {
+  string target_id = 1;
+  repeated uint64 breakpoints = 2;
+  string path = 3;
+  string digest = 4;
+  bytes data = 5;
+  float execution_timeout_in_seconds = 6;
+}
+
+message GRPCRunImageResponse {
+  string target_id = 1;
+  string path = 2;
+  string digest = 3;
+  bytes output = 4;
+  string status = 5;
+  float load_duration_in_seconds = 6;
+  float execution_duration_in_seconds = 7;
+}
+
+service GRPCService {
+  rpc request_action (GRPCActionRequest) returns (GRPCActionResponse);
+  rpc request_describe_target (GRPCDescribeTargetRequest) returns (GRPCDescribeTargetResponse);
+  rpc request_input (GRPCInputRequest) returns (stream GRPCInputResponse);
+  rpc request_log (GRPCLogRequest) returns (stream GRPCLogResponse);
+  rpc request_run_image (GRPCRunImageRequest) returns (GRPCRunImageResponse);
+}
