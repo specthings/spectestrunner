@@ -2,7 +2,6 @@
 /tests/util/test-packet-echo
 *.o
 .coverage
-.python-version
 __pycache__
 cache
 dist
