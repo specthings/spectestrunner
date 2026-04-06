@@ -801,7 +801,7 @@ wheels = [
 
 [[package]]
 name = "spectestrunner"
-version = "0.9.2.dev1"
+version = "0.9.2"
 source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
