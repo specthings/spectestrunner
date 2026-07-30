@@ -28,13 +28,14 @@ import argparse
 import logging
 import sys
 
-import grpc
 from specitems import get_arguments
 
 from spectestrunner import image
+from spectestrunner.exitcodes import EXIT_OK, EXIT_STATUS, EXIT_USAGE
+from spectestrunner.grpcclient import run_with_service
 
 # pylint: disable=no-name-in-module
-from spectestrunner import GRPCRunImageRequest, GRPCServiceStub  # type: ignore
+from spectestrunner import GRPCRunImageRequest  # type: ignore
 
 
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
@@ -56,6 +57,10 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
         parser.add_argument("--strip",
                             help="the path to the strip tool",
                             default="strip")
+        parser.add_argument(
+            "--fail-on-status",
+            help="exit with a non-zero status if a run reports another status",
+            default=None)
         parser.add_argument("images", nargs='+')
 
     return get_arguments(argv,
@@ -63,11 +68,12 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                          add_arguments=(_add_arguments, ))
 
 
-def clirun(argv: list[str] = sys.argv):
+def clirun(argv: list[str] = sys.argv) -> int:
     """ Run images using gRPC. """
     args = _get_arguments(argv[1:])
-    with grpc.insecure_channel(args.server_address) as channel:
-        stub = GRPCServiceStub(channel)
+
+    def _work(stub) -> int:
+        status = EXIT_OK
         for exe_path in args.images:
             breakpoints = image.get_breakpoints(exe_path, args.nm)
             logging.info("send: %s", exe_path)
@@ -86,3 +92,15 @@ def clirun(argv: list[str] = sys.argv):
             logging.info("execution duration in seconds: %s",
                          result.execution_duration_in_seconds)
             print(result.output.decode("latin-1"))
+            if (args.fail_on_status is not None
+                    and result.status != args.fail_on_status):
+                logging.error("%s reported status '%s' instead of '%s'",
+                              result.path, result.status, args.fail_on_status)
+                status = EXIT_STATUS
+        return status
+
+    try:
+        return run_with_service(args.server_address, _work)
+    except image.ImageError as err:
+        logging.error("%s", err)
+        return EXIT_USAGE

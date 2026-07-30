@@ -37,26 +37,14 @@ from specitems import get_arguments
 
 from spectestrunner import gitproto, gitwire, image
 
-#: The round trip completed regardless of the reported run status.
-EXIT_OK = 0
+# pylint: disable=unused-import
+from spectestrunner.exitcodes import (  # noqa: F401
+    EXIT_ACTION, EXIT_MISSING, EXIT_OK, EXIT_REJECTED, EXIT_STATUS,
+    EXIT_TIMEOUT, EXIT_TRANSPORT, EXIT_USAGE)
 
-#: The bridge permanently refused the request.
-EXIT_REJECTED = 1
-
-#: No response arrived before the wait timeout expired.
-EXIT_TIMEOUT = 2
-
-#: A Git or transport operation failed.
-EXIT_GIT = 3
-
-#: A run reported a status other than the expected one.
-EXIT_STATUS = 4
-
-#: The request vanished before a response arrived.
-EXIT_MISSING = 5
-
-#: An action step failed, so the steps after it did not run.
-EXIT_ACTION = 6
+#: A Git or transport operation failed.  This is the name of the transport
+#: exit code which this command used before the codes were shared.
+EXIT_GIT = EXIT_TRANSPORT
 
 
 class _RequestGone(RuntimeError):
@@ -84,8 +72,11 @@ class _OnFailure(argparse.Action):  # pylint: disable=too-few-public-methods
     """ Set the failure policy of the preceding step. """
 
     def __call__(self, parser, namespace, values, option_string=None):
+        # The command reports its own usage errors, so record the problem
+        # instead of letting argparse exit while it parses.
         if not namespace.steps:
-            parser.error(f"{option_string} has no preceding step")
+            namespace.bad_usage = f"{option_string} has no preceding step"
+            return
         namespace.steps[-1]["continue_on_failure"] = (
             option_string == "--continue-on-failure")
 
@@ -137,7 +128,7 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
         # command line is the order of the sequence.  The default belongs to
         # the parser rather than to the first of them, which would make the
         # order of the add_argument calls significant.
-        parser.set_defaults(steps=[])
+        parser.set_defaults(steps=[], bad_usage=None)
         parser.add_argument("--action",
                             metavar="UID:ACTION",
                             dest="steps",
@@ -356,18 +347,28 @@ def _round_trip(repo: gitwire.Repository, args: argparse.Namespace) -> int:
     return _exit_status(args, payload)
 
 
+def _usage_error(args: argparse.Namespace) -> Optional[str]:
+    """ Return the reason why the command line is not usable, if any. """
+    if args.bad_usage is not None:
+        return args.bad_usage
+    if args.collect is None and not args.images and not args.steps:
+        return "no steps given"
+    return None
+
+
 def cligitrun(argv: list[str] = sys.argv) -> int:
     """ Run a step sequence on a test server through a Git repository. """
     args = _get_arguments(argv[1:])
-    if args.collect is None and not args.images and not args.steps:
-        logging.error("no steps given")
-        return EXIT_GIT
+    reason = _usage_error(args)
+    if reason is not None:
+        logging.error("%s", reason)
+        return EXIT_USAGE
     try:
         with _repository(args.work_dir) as repo:
             return _round_trip(repo, args)
-    except _BadUsage as err:
+    except (_BadUsage, image.ImageError) as err:
         logging.error("%s", err)
-        return EXIT_GIT
+        return EXIT_USAGE
     except _RequestGone as err:
         logging.error("%s", err)
         return EXIT_MISSING

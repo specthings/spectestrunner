@@ -26,12 +26,14 @@
 
 import argparse
 import sys
-import grpc
 
 from specitems import get_arguments
 
+from spectestrunner.exitcodes import EXIT_OK
+from spectestrunner.grpcclient import run_with_service
+
 # pylint: disable=no-name-in-module
-from spectestrunner import GRPCDescribeTargetRequest, GRPCServiceStub
+from spectestrunner import GRPCDescribeTargetRequest
 
 
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
@@ -50,11 +52,14 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                          add_arguments=(_add_arguments, ))
 
 
-def clidescribetarget(argv: list[str] = sys.argv):
+def clidescribetarget(argv: list[str] = sys.argv) -> int:
     """ Request a target description from a test server through gRPC. """
     args = _get_arguments(argv[1:])
-    with grpc.insecure_channel(args.server_address) as channel:
-        stub = GRPCServiceStub(channel)
+
+    def _work(stub) -> int:
         response = stub.request_describe_target(
             GRPCDescribeTargetRequest(target_id=args.target[0]))
         print(response.description)
+        return EXIT_OK
+
+    return run_with_service(args.server_address, _work)

@@ -26,12 +26,14 @@
 
 import argparse
 import sys
-import grpc
 
 from specitems import get_arguments
 
+from spectestrunner.exitcodes import EXIT_OK
+from spectestrunner.grpcclient import run_with_service, take_stream
+
 # pylint: disable=no-name-in-module
-from spectestrunner import GRPCInputRequest, GRPCServiceStub
+from spectestrunner import GRPCInputRequest
 
 
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
@@ -40,6 +42,14 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
         parser.add_argument("--server-address",
                             help="the server address",
                             default="localhost:50051")
+        parser.add_argument("--max-lines",
+                            help="stop after this many responses",
+                            type=int,
+                            default=None)
+        parser.add_argument("--timeout",
+                            help="stop after this many seconds",
+                            type=float,
+                            default=None)
         parser.add_argument("uid", metavar="UID", nargs=1)
 
     return get_arguments(argv,
@@ -47,11 +57,15 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                          add_arguments=(_add_arguments, ))
 
 
-def cliio(argv: list[str] = sys.argv):
+def cliio(argv: list[str] = sys.argv) -> int:
     """ Perform input and output on a test server through gRPC. """
     args = _get_arguments(argv[1:])
-    with grpc.insecure_channel(args.server_address) as channel:
-        stub = GRPCServiceStub(channel)
-        responses = stub.request_input(GRPCInputRequest(uid=args.uid[0]))
-        for response in responses:
+
+    def _work(stub) -> int:
+        responses = stub.request_input(GRPCInputRequest(uid=args.uid[0]),
+                                       timeout=args.timeout)
+        for response in take_stream(responses, args.max_lines):
             print(response.data.decode("latin-1"), end="")
+        return EXIT_OK
+
+    return run_with_service(args.server_address, _work)
