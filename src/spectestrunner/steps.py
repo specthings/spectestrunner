@@ -24,17 +24,17 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-import argparse
 import dataclasses
 import logging
 import math
+import signal
 import time
 from typing import Any, Callable, Iterator, Optional
 
 import grpc
 
-from . import image
-from .exitcodes import EXIT_ACTION, EXIT_OK, EXIT_STATUS, EXIT_TRANSPORT
+from .exitcodes import (EXIT_ACTION, EXIT_INTERRUPTED, EXIT_OK, EXIT_STATUS,
+                        EXIT_TRANSPORT)
 
 # pylint: disable=no-name-in-module
 from .servicegrpc_pb2 import (  # type: ignore
@@ -73,10 +73,6 @@ ACTION_SUCCESS = "success"
 #: The server reports its own failures with an 'error:' status, so a step
 #: which did not run at all needs a prefix of its own.
 STATUS_UNREACHED = "unreached: "
-
-
-class UsageError(RuntimeError):
-    """ This error indicates that the command line is not usable. """
 
 
 class TransientError(RuntimeError):
@@ -188,10 +184,13 @@ def exit_status(results: list[dict[str, Any]],
                 and not succeeded(status)):
             logging.error("%s failed: %s", describe_step(result), status)
             return EXIT_ACTION
-    if fail_on_status is not None and any(
-            result.get("status") != fail_on_status
-            for result in results if result.get("kind") == STEP_IMAGE):
-        return EXIT_STATUS
+    for result in results:
+        if (fail_on_status is not None and result.get("kind") == STEP_IMAGE
+                and result.get("status") != fail_on_status):
+            logging.error("%s reported status '%s' instead of '%s'",
+                          describe_step(result), result.get("status"),
+                          fail_on_status)
+            return EXIT_STATUS
     return EXIT_OK
 
 
@@ -337,8 +336,12 @@ def run_steps(
     step continues on failure.  A step which failed for good yields a result
     with an error status, since the steps before it ran and may have
     activated resources.  A failure which justifies another attempt of the
-    whole sequence raises a transient error instead, and so does the caller
-    asking for a stop through is_stopped during a wait.
+    whole sequence raises a transient error instead.
+
+    A stop through is_stopped ends a wait with a stopped error, since a wait
+    is doing nothing anyway.  A step which is doing work is never abandoned
+    half way through, so whoever consumes this decides whether to ask for the
+    step after it.
     """
     stopped = False
     for index, step in enumerate(sequence):
@@ -367,169 +370,63 @@ def run_steps(
             stopped = True
 
 
-#: The step kind of each option which appends a step.
-_STEP_KIND_BY_OPTION = {
-    "--action": STEP_ACTION,
-    "--image": STEP_IMAGE,
-    "--wait": STEP_WAIT,
-}
+def _report_the_rest(sequence: list[dict[str, Any]], done: int) -> int:
+    """ Report the steps which never ran and return the exit code. """
+    for step in sequence[done:]:
+        report_result(bare_result(step, STATUS_SKIPPED))
+    return EXIT_INTERRUPTED
 
 
-class _Step(argparse.Action):  # pylint: disable=too-few-public-methods
-    """ Append the option value to the ordered step list. """
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        namespace.steps.append({
-            "kind": _STEP_KIND_BY_OPTION[option_string],
-            "value": values,
-            "continue_on_failure": None,
-        })
-
-
-class _OnFailure(argparse.Action):  # pylint: disable=too-few-public-methods
-    """ Set the failure policy of the preceding step. """
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        # The commands report their own usage errors, so record the problem
-        # instead of letting argparse exit while it parses.
-        if not namespace.steps:
-            namespace.bad_usage = f"{option_string} has no preceding step"
-            return
-        namespace.steps[-1]["continue_on_failure"] = (
-            option_string == "--continue-on-failure")
-
-
-def add_arguments(parser: argparse.ArgumentParser) -> None:
+def run_and_report(stub: Any,
+                   context: Context,
+                   sequence: list[dict[str, Any]],
+                   fail_on_status: Optional[str] = None,
+                   is_stopped: Optional[Callable[[], bool]] = None) -> int:
     """
-    Add the options which every command that runs a step sequence shares.
+    Run the sequence, report every result as it arrives, and return the exit
+    code the results deserve.
 
-    Only the options of the transport belong to a command of its own, so
-    whatever is added here reaches all of them or none of them.
+    A stop ends the sequence before the step which follows the one that just
+    completed, so an interrupt does not start work which nobody wants any
+    more.  The steps which never ran are reported, so that whoever
+    interrupted can see which resources are still activated.
+
+    A stop which arrives during the last step leaves nothing to skip, so the
+    results are complete and they decide the exit code as usual.
     """
-    parser.add_argument("--target",
-                        help="the target identifier",
-                        default="/does/not/exist")
-    parser.add_argument("--timeout",
-                        help="the execution timeout",
-                        type=float,
-                        default=180.0)
-    parser.add_argument("--nm", help="the path to the nm tool", default="nm")
-    parser.add_argument("--strip",
-                        help="the path to the strip tool",
-                        default="strip")
-    parser.add_argument(
-        "--fail-on-status",
-        help="exit with a non-zero status if a run reports another status",
-        default=None)
-
-    # The step options share one destination so that their order on the
-    # command line is the order of the sequence.  The default belongs to the
-    # parser rather than to the first of them, which would make the order of
-    # the add_argument calls significant.
-    parser.set_defaults(steps=[], bad_usage=None)
-    parser.add_argument("--action",
-                        metavar="UID:ACTION",
-                        dest="steps",
-                        action=_Step,
-                        help="append an action step to the sequence")
-    parser.add_argument("--image",
-                        metavar="IMAGE",
-                        dest="steps",
-                        action=_Step,
-                        help="append an image step to the sequence")
-    # The value stays a string so that a malformed one yields the exit code
-    # of the command instead of the exit code of argparse.
-    parser.add_argument("--wait",
-                        metavar="SECONDS",
-                        dest="steps",
-                        action=_Step,
-                        help="append a step which delays the sequence")
-    parser.add_argument("--continue-on-failure",
-                        dest="steps",
-                        action=_OnFailure,
-                        nargs=0,
-                        help="run the following steps although the preceding "
-                        "step failed")
-    parser.add_argument("--stop-on-failure",
-                        dest="steps",
-                        action=_OnFailure,
-                        nargs=0,
-                        help="skip the following steps if the preceding step "
-                        "failed")
-    parser.add_argument("images", nargs="*")
-
-
-def usage_error(args: argparse.Namespace,
-                need_steps: bool = True) -> Optional[str]:
-    """ Return the reason why the command line is not usable, if any. """
-    if args.bad_usage is not None:
-        return args.bad_usage
-    if need_steps and not args.images and not args.steps:
-        return "no steps given"
-    return None
-
-
-def make_action_step(value: str) -> dict[str, Any]:
-    """ Return the action step of a uid and action pair. """
-    uid, _, action = value.partition(":")
-    if not uid or not action:
-        raise UsageError(f"'{value}' is no <uid>:<action> action")
-    return {"kind": STEP_ACTION, "uid": uid, "action": action}
-
-
-def _make_wait_step(value: str) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
     try:
-        seconds = check_wait_seconds(float(value))
-    except ValueError as err:
-        raise UsageError(f"'{value}' is no wait in seconds: {err}") from err
-    return {"kind": STEP_WAIT, "seconds": seconds}
+        for result in run_steps(stub, context, sequence, is_stopped):
+            report_result(result)
+            results.append(result)
+            if (is_stopped is not None and is_stopped()
+                    and len(results) < len(sequence)):
+                logging.info("stopped after the %s", describe_step(result))
+                return _report_the_rest(sequence, len(results))
+    except TransientError as err:
+        # Whoever attempts the sequence again decides what this means.  A
+        # command which built the sequence itself has nothing to attempt.
+        logging.error("%s", err)
+        return EXIT_TRANSPORT
+    except Stopped as err:
+        logging.info("%s", err)
+        return _report_the_rest(sequence, len(results))
+    return exit_status(results, fail_on_status)
 
 
-def _make_image_step(args: argparse.Namespace,
-                     exe_path: str) -> tuple[dict[str, Any], bytes]:
-    data = image.strip_image(exe_path, args.strip)
-    logging.info("prepared: %s", exe_path)
-    return {
-        "kind": STEP_IMAGE,
-        "path": exe_path,
-        "digest": image.get_digest(data),
-        "breakpoints": image.get_breakpoints(exe_path, args.nm),
-    }, data
-
-
-def _get_wanted_steps(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """ Return the steps the command line asked for, in its order. """
-    if args.images:
-        if args.steps:
-            raise UsageError("the image positionals have no defined order "
-                             "with respect to the step options, use --image")
-        return [{
-            "kind": STEP_IMAGE,
-            "value": exe_path,
-            "continue_on_failure": None,
-        } for exe_path in args.images]
-    return args.steps
-
-
-def build_steps(
-        args: argparse.Namespace
-) -> tuple[list[dict[str, Any]], dict[int, bytes]]:
+def stop_on_signal() -> Callable[[], bool]:
     """
-    Return the sequence of the command line and its images by step index.
+    Install the signal handlers which stop a sequence.
 
-    Every image is prepared before the first step runs, so that a typo in the
-    last one of them costs nothing on the bench.
+    Returns the predicate which reports whether a stop was requested.
     """
-    sequence = []
-    data = {}
-    for index, wanted in enumerate(_get_wanted_steps(args)):
-        if wanted["kind"] == STEP_ACTION:
-            step = make_action_step(wanted["value"])
-        elif wanted["kind"] == STEP_WAIT:
-            step = _make_wait_step(wanted["value"])
-        else:
-            step, data[index] = _make_image_step(args, wanted["value"])
-        if wanted["continue_on_failure"] is not None:
-            step["continue_on_failure"] = wanted["continue_on_failure"]
-        sequence.append(step)
-    return sequence, data
+    stopped = False
+
+    def _stop(_signum, _frame):
+        nonlocal stopped
+        logging.info("stop requested, finishing the current step")
+        stopped = True
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, _stop)
+    return lambda: stopped

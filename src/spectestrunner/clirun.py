@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: BSD-2-Clause
-""" Run images on a test server through gRPC. """
+""" Run a step sequence on a test server through gRPC. """
 
 # Copyright (C) 2024 embedded brains GmbH & Co. KG
 #
@@ -30,38 +30,18 @@ import sys
 
 from specitems import get_arguments
 
-from spectestrunner import image
-from spectestrunner.exitcodes import EXIT_OK, EXIT_STATUS, EXIT_USAGE
+from spectestrunner import image, stepargs, steps
+from spectestrunner.exitcodes import EXIT_USAGE
 from spectestrunner.grpcclient import run_with_service
-
-# pylint: disable=no-name-in-module
-from spectestrunner import GRPCRunImageRequest  # type: ignore
 
 
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
 
     def _add_arguments(parser):
-        parser.add_argument("--target",
-                            help="the target identifier",
-                            default="/does/not/exist")
-        parser.add_argument("--timeout",
-                            help="the execution timeout",
-                            type=float,
-                            default=180.0)
         parser.add_argument("--server-address",
                             help="the server address",
                             default="localhost:50051")
-        parser.add_argument("--nm",
-                            help="the path to the nm tool",
-                            default="nm")
-        parser.add_argument("--strip",
-                            help="the path to the strip tool",
-                            default="strip")
-        parser.add_argument(
-            "--fail-on-status",
-            help="exit with a non-zero status if a run reports another status",
-            default=None)
-        parser.add_argument("images", nargs='+')
+        stepargs.add_arguments(parser)
 
     return get_arguments(argv,
                          description=clirun.__doc__,
@@ -69,38 +49,21 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
 
 
 def clirun(argv: list[str] = sys.argv) -> int:
-    """ Run images using gRPC. """
+    """ Run a step sequence on a test server through gRPC. """
     args = _get_arguments(argv[1:])
-
-    def _work(stub) -> int:
-        status = EXIT_OK
-        for exe_path in args.images:
-            breakpoints = image.get_breakpoints(exe_path, args.nm)
-            logging.info("send: %s", exe_path)
-            data = image.strip_image(exe_path, args.strip)
-            result = stub.request_run_image(
-                GRPCRunImageRequest(target_id=args.target,
-                                    breakpoints=breakpoints,
-                                    path=exe_path,
-                                    digest="digest",
-                                    data=data,
-                                    execution_timeout_in_seconds=args.timeout))
-            logging.info("received result for: %s", result.path)
-            logging.info("result status: %s", result.status)
-            logging.info("load duration in seconds: %s",
-                         result.load_duration_in_seconds)
-            logging.info("execution duration in seconds: %s",
-                         result.execution_duration_in_seconds)
-            print(result.output.decode("latin-1"))
-            if (args.fail_on_status is not None
-                    and result.status != args.fail_on_status):
-                logging.error("%s reported status '%s' instead of '%s'",
-                              result.path, result.status, args.fail_on_status)
-                status = EXIT_STATUS
-        return status
-
+    reason = stepargs.usage_error(args)
+    if reason is not None:
+        logging.error("%s", reason)
+        return EXIT_USAGE
     try:
-        return run_with_service(args.server_address, _work)
-    except image.ImageError as err:
+        sequence, data = stepargs.build_steps(args)
+    except (stepargs.UsageError, image.ImageError) as err:
         logging.error("%s", err)
         return EXIT_USAGE
+    context = steps.Context(target=args.target,
+                            timeout=args.timeout,
+                            data=data)
+    is_stopped = steps.stop_on_signal()
+    return run_with_service(
+        args.server_address, lambda stub: steps.run_and_report(
+            stub, context, sequence, args.fail_on_status, is_stopped))

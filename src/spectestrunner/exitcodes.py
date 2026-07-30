@@ -51,3 +51,7 @@ EXIT_SPECIFICATION = 7
 
 #: No response arrived before the wait timeout expired.
 EXIT_TIMEOUT = 8
+
+#: The command was interrupted.  This is the conventional 128 plus the
+#: number of SIGINT, so it collides with none of the codes above.
+EXIT_INTERRUPTED = 130

@@ -20,49 +20,105 @@ project.
 Please refer to our
 [Contributing Guidelines](https://github.com/specthings/spectestrunner/blob/main/CONTRIBUTING.md).
 
+## Step sequences
+
+The `spectestrun` and `spectestgitrun` commands both run a sequence of steps on
+a test server.  They differ only in the transport which carries the sequence,
+so everything in this section applies to either of them.
+
+Use `--image`, `--action` and `--wait` to build the sequence, which runs in the
+order of the command line:
+
+```
+spectestrun --target=aarch64/zynqmp_apu \
+  --action=/service/some-peer:activate:bc --image=bc.exe --wait=5 \
+  --image=rt.exe --action=/service/some-peer:deactivate
+```
+
+An `--image` step runs an executable, an `--action` step requests an action of
+an agent, and a `--wait` step delays the sequence.  Several images may also be
+given as positional arguments, which is the short form of a sequence of nothing
+but images.  Positional arguments cannot be mixed with the step options, since
+the command line gives no order between the two.
+
+### Failure policy
+
+A step which fails stops the sequence and the steps after it are reported as
+skipped.  A failed image step is the exception, because a run which reports a
+failure produced the result the sequence asked for, while a failed action
+falsified the precondition of everything after it.
+
+Use `--continue-on-failure` and `--stop-on-failure` to override this for the
+step which precedes the option.
+
+### Waits
+
+A wait lets the hardware settle between two runs.  It delays only the sequence
+it belongs to, and the resources the sequence activated stay claimed for its
+duration.
+
+With `spectestgitrun` the wait happens on the bridge, which serves the requests
+of everybody one after the other, so **a wait holds up the whole bench for its
+duration**.  Keep the waits short and remember that the bridge has no limit of
+its own.  A wait which is longer than `--wait-timeout` makes the command give up
+before the response arrives.  It warns about this, and the response is still
+collectable later with `--collect`.
+
+An activation lease keeps running during a wait, so a wait which is longer than
+the lease of a resource the sequence activated loses that resource.
+
+### Expected run status
+
+Use `--fail-on-status` to exit with a non-zero status if a run reports another
+status than the expected one, for example `--fail-on-status=success`.  Only an
+image step reports a status which the caller can expect of it.
+
+A step which never reached its target is a failure of its own, whether the
+server was unreachable or the target has no image runner.  Such a step is not a
+run which merely reported a failure, so it exits non-zero without
+`--fail-on-status`.
+
+### Interrupts
+
+An interrupt ends a sequence which runs on this side of the transport, which
+means `spectestrun` and `spectestaction`.  A wait ends at once, since it is
+doing nothing anyway, while a step which is doing work runs to its end, because
+the steps after it may be the ones which release what it claimed.  The sequence
+then stops instead of starting the next step, and the steps which never ran are
+reported, so that the resources it left activated are visible.
+
+An in-flight run therefore delays the exit by up to the execution timeout.
+Nothing cancels a call which the server is already serving.
+
 ## Commands
 
 ### Command - spectestrun
 
-The `spectestrun` command runs an executable on a test server, for example:
+The `spectestrun` command runs a step sequence on a test server through gRPC,
+for example:
 
 ```
-spectestrun --target=aarch64/zynqmp_apu ticker.exe
+spectestrun --server-address=foobar:50051 --target=aarch64/zynqmp_apu ticker.exe
 ```
 
-Use `--fail-on-status` to exit with a non-zero status if a run reports another
-status than the expected one, for example `--fail-on-status=success`.
+It reports each result as it arrives, so a long sequence shows the output of
+every run as it happens rather than at its end.
 
 ### Command - spectestgitrun
 
-The `spectestgitrun` command runs an executable on a test server which is
+The `spectestgitrun` command runs a step sequence on a test server which is
 reachable only through a Git remote, for example:
 
 ```
 spectestgitrun --remote=git@host:bench.git --target=aarch64/zynqmp_apu ticker.exe
 ```
 
-It prepares the executable exactly like `spectestrun` does, commits it, pushes
-the commit, waits for the response commit, and prints the results.  See the
-*Git mediated transport* section below.
+It prepares the executables exactly like `spectestrun` does, commits them,
+pushes the commit, waits for the response commit, and reports the results.  See
+the *Git mediated transport* section below.
 
-Use `--image`, `--action` and `--wait` to build a sequence of steps which runs
-in the order of the command line, for example:
-
-```
-spectestgitrun --remote=git@host:bench.git --target=aarch64/zynqmp_apu \
-  --action=/service/some-peer:activate:bc --image=bc.exe --wait=5 \
-  --image=rt.exe --action=/service/some-peer:deactivate
-```
-
-A `--wait` step delays the sequence on the bridge, which is useful to let the
-hardware settle between two runs.  The bridge serves the requests of everybody
-one after the other, so **a wait holds up the whole bench for its duration**.
-Keep the waits short and remember that the bridge has no limit of its own.
-
-A wait which is longer than `--wait-timeout` makes the command give up before
-the response arrives.  The command warns about this, and the response is still
-collectable later with `--collect`.
+Use `--no-wait` to print the request identifier and exit, and `--collect` to
+report the response of a request which was submitted before.
 
 Note that `--wait` used to be an unambiguous abbreviation of `--wait-timeout`
 and now appends a step instead.  Spell `--wait-timeout` out.
@@ -86,6 +142,11 @@ spectestaction --server-address=foobar:50051 /switch/some-switch:activate:some-b
 
 Each request has the format `<uid>:<action>`.  The available actions are
 `activate:<name>[:<lease>]`, `deactivate[:<name>]` and `status`.
+
+The requests are independent of each other, so a failed one does not stop the
+ones after it and an operator who releases two resources gets both attempted.
+This is the opposite of an `--action` step of a sequence, where a failed action
+falsified the precondition of everything after it.
 
 The command exits with a non-zero status if an action reports an error.
 
@@ -157,15 +218,17 @@ The commands share these exit codes:
 | 0 | The command did its work.  A run may still have reported a failure. |
 | 1 | The request was permanently refused. |
 | 2 | The command line is not usable. |
-| 3 | A transport operation failed, for example the server is unreachable. |
+| 3 | A step never reached its target, for example the server is unreachable. |
 | 4 | A run reported a status other than the one of `--fail-on-status`. |
 | 5 | The request vanished before a response arrived. |
 | 6 | An action failed, so the steps after it did not run. |
 | 7 | The specification of the server is not valid. |
 | 8 | No response arrived before the wait timeout expired. |
+| 130 | The command was interrupted. |
 
-Code 2 is the one `argparse` itself uses, so an unknown option and a
-malformed value of ours mean the same thing.
+Code 2 is the one `argparse` itself uses, so an unknown option and a malformed
+value of ours mean the same thing.  Code 130 is the conventional 128 plus the
+number of `SIGINT`.
 
 ## Git mediated transport
 
@@ -224,9 +287,10 @@ steps:
 --- end ---
 ```
 
-The `steps` run in the order of the list.  A step of the `image` kind runs an
-executable, one of the `action` kind requests an action of an agent, and one of
-the `wait` kind delays the sequence on the bridge.
+The `steps` run in the order of the list and have the kinds described in the
+*Step sequences* section above.  The `file` of an image step names the blob of
+the commit which holds it and exists only in this transport, since the direct
+one sends the bytes with the request.
 
 ### Response commit
 
@@ -257,13 +321,10 @@ of overwriting a response which another bridge pushed first.  Git enforces fast
 forward updates only below `refs/heads` and `refs/tags`, so an ordinary push
 would silently replace the existing response.
 
-The `spectestgitrun` command uses the shared exit codes described above.  It
-exits with 0 if the round trip completed, whatever the reported run status was,
-with 1 if the bridge rejected the request, with 2 if the command line is not
-usable, with 3 on a Git or transport error, with 4 if `--fail-on-status` was
-given and a run reported another status, with 5 if the remote has neither a
-request nor a response reference for the request, so that no response can ever
-arrive, with 6 if an action step failed, and with 8 if it gave up waiting.
+The `spectestgitrun` command uses the shared exit codes described above.  Two of
+them mean something specific to this transport: 3 also covers a Git error, and 5
+means that the remote has neither a request nor a response reference for the
+request, so that no response can ever arrive.
 
 ### Security
 

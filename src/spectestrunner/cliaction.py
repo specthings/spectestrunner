@@ -27,15 +27,13 @@
 import argparse
 import logging
 import sys
+from typing import Any
 
 from specitems import get_arguments
 
-from spectestrunner import steps
-from spectestrunner.exitcodes import EXIT_ACTION, EXIT_OK
+from spectestrunner import stepargs, steps
+from spectestrunner.exitcodes import EXIT_USAGE
 from spectestrunner.grpcclient import run_with_service
-
-# pylint: disable=no-name-in-module
-from spectestrunner import GRPCActionRequest
 
 
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
@@ -59,23 +57,32 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                          add_arguments=(_add_arguments, ))
 
 
+def _get_steps(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """
+    Return the action steps of the command line.
+
+    The requests of this command are independent of each other rather than a
+    sequence with preconditions, so a failed one does not skip the rest.  An
+    operator who deactivates two resources wants both attempted.
+    """
+    sequence = []
+    for request in args.requests:
+        step = stepargs.make_action_step(request)
+        step["continue_on_failure"] = True
+        sequence.append(step)
+    return sequence
+
+
 def cliaction(argv: list[str] = sys.argv) -> int:
     """ Request an action on a test server through gRPC. """
     args = _get_arguments(argv[1:])
-
-    def _work(stub) -> int:
-        status = EXIT_OK
-        for request in args.requests:
-            uid, _, action = request.partition(":")
-            response = stub.request_action(GRPCActionRequest(uid=uid,
-                                                             action=action),
-                                           timeout=args.timeout)
-            logging.info("action '%s' for %s -> status '%s'", action, uid,
-                         response.status)
-            if not steps.succeeded(response.status):
-                logging.error("action '%s' for %s failed: %s", action, uid,
-                              response.status)
-                status = EXIT_ACTION
-        return status
-
-    return run_with_service(args.server_address, _work)
+    try:
+        sequence = _get_steps(args)
+    except stepargs.UsageError as err:
+        logging.error("%s", err)
+        return EXIT_USAGE
+    context = steps.Context(target="", timeout=args.timeout, data={})
+    is_stopped = steps.stop_on_signal()
+    return run_with_service(
+        args.server_address, lambda stub: steps.run_and_report(
+            stub, context, sequence, is_stopped=is_stopped))
