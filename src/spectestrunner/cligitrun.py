@@ -36,7 +36,7 @@ from typing import Any, Iterator, Optional
 
 from specitems import get_arguments
 
-from spectestrunner import gitproto, gitwire, image, steps
+from spectestrunner import gitproto, gitwire, image, stepargs, steps
 
 # pylint: disable=unused-import
 from spectestrunner.exitcodes import (  # noqa: F401
@@ -78,7 +78,7 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
         parser.add_argument("--collect",
                             help="collect the response of this request",
                             default=None)
-        steps.add_arguments(parser)
+        stepargs.add_arguments(parser)
 
     return get_arguments(argv,
                          description=cligitrun.__doc__,
@@ -118,7 +118,7 @@ def _warn_about_the_waits(args: argparse.Namespace,
 
 def _submit(repo: gitwire.Repository, args: argparse.Namespace) -> str:
     """ Push a request commit and return its identifier. """
-    request_steps, data = steps.build_steps(args)
+    request_steps, data = stepargs.build_steps(args)
 
     # Only a commit stores an image as a file, so the step gains the name of
     # that file here rather than where the sequence is built.
@@ -238,14 +238,14 @@ def cligitrun(argv: list[str] = sys.argv) -> int:
 
     # A collection needs no steps of its own, since it reports the response
     # of a request which was submitted before.
-    reason = steps.usage_error(args, need_steps=args.collect is None)
+    reason = stepargs.usage_error(args, need_steps=args.collect is None)
     if reason is not None:
         logging.error("%s", reason)
         return EXIT_USAGE
     try:
         with _repository(args.work_dir) as repo:
             return _round_trip(repo, args)
-    except (steps.UsageError, image.ImageError) as err:
+    except (stepargs.UsageError, image.ImageError) as err:
         logging.error("%s", err)
         return EXIT_USAGE
     except _RequestGone as err:
