@@ -107,3 +107,22 @@ def test_digest():
     """ The digest names its algorithm. """
     assert image.get_digest(
         b"data") == "sha256:" + hashlib.sha256(b"data").hexdigest()
+
+
+def test_a_strip_which_removes_its_output(tmp_path, exe):
+    """
+    A strip which removes the output it was given is reported.
+
+    The tool does that when it does not recognize the format of the input, and
+    cleaning the output up afterwards hid why the strip failed.
+    """
+    strip = _tool(tmp_path / "strip", '#!/bin/sh\nrm -f "$3"\nexit 1\n')
+    with pytest.raises(image.ImageError, match="could not strip"):
+        image.strip_image(exe, strip)
+
+
+def test_a_strip_which_writes_no_output(tmp_path, exe):
+    """ A strip which reports success without an output is reported. """
+    strip = _tool(tmp_path / "strip", "#!/bin/sh\nexit 0\n")
+    with pytest.raises(image.ImageError, match="could not strip"):
+        image.strip_image(exe, strip)

@@ -25,6 +25,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 import hashlib
+import os
 import subprocess
 import tempfile
 
@@ -74,14 +75,23 @@ def get_breakpoints(exe_path: str, nm_path: str) -> list[int]:
 
 
 def strip_image(exe_path: str, strip_path: str) -> bytes:
-    """ Return the executable stripped of its debug information. """
-    with tempfile.NamedTemporaryFile() as tmp:
+    """
+    Return the executable stripped of its debug information.
+
+    The tool writes into a directory of its own rather than into a named
+    temporary file.  A strip which fails removes the output it was given, so
+    cleaning such a file up raised for the missing file and hid why the strip
+    failed in the first place.
+    """
+    with tempfile.TemporaryDirectory(prefix="spectestrunner-") as tmp:
+        stripped = os.path.join(tmp, os.path.basename(exe_path))
         try:
-            subprocess.run([strip_path, "-g", "-o", tmp.name, exe_path],
+            subprocess.run([strip_path, "-g", "-o", stripped, exe_path],
                            check=True)
+            with open(stripped, "rb") as out:
+                return out.read()
         except (subprocess.CalledProcessError, OSError) as err:
             raise ImageError(f"could not strip '{exe_path}': {err}") from err
-        return tmp.read()
 
 
 def get_digest(data: bytes) -> str:
