@@ -35,7 +35,7 @@ spectestrun --target=aarch64/zynqmp_apu ticker.exe
 The `spectestaction` command runs actions on a test server, for example:
 
 ```
-spectestaction --server-address=foobar:50051 /switch/net-pwr-ctrl-2:activate:zc702
+spectestaction --server-address=foobar:50051 /switch/some-switch:activate:some-board
 ```
 
 ### Command - spectestlog
