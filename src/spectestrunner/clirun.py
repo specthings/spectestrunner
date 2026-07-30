@@ -26,12 +26,12 @@
 
 import argparse
 import logging
-import subprocess
 import sys
-import tempfile
 
 import grpc
 from specitems import get_arguments
+
+from spectestrunner import image
 
 # pylint: disable=no-name-in-module
 from spectestrunner import GRPCRunImageRequest, GRPCServiceStub  # type: ignore
@@ -63,46 +63,19 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                          add_arguments=(_add_arguments, ))
 
 
-def _get_symbols(exe_path: str, nm_path: str) -> dict[str, list[int]]:
-    """" Return the symbols of the executable using the nm tool. """
-    try:
-        result = subprocess.run([nm_path, exe_path],
-                                check=True,
-                                capture_output=True,
-                                text=True)
-    except subprocess.CalledProcessError:
-        return {}
-    symbols: dict[str, list[int]] = {}
-    for line in result.stdout.split("\n"):
-        try:
-            address, _, name = line.rstrip("\r\n").split(" ", 2)
-        except ValueError:
-            pass
-        else:
-            try:
-                symbols.setdefault(name, []).append(int(address, 16))
-            except ValueError:
-                pass
-    return symbols
-
-
 def clirun(argv: list[str] = sys.argv):
     """ Run images using gRPC. """
     args = _get_arguments(argv[1:])
     with grpc.insecure_channel(args.server_address) as channel:
         stub = GRPCServiceStub(channel)
-        for image in args.images:
-            breakpoints = _get_symbols(image, args.nm).get("bsp_reset", [])
-            logging.info("send: %s", image)
-            with tempfile.NamedTemporaryFile() as tmp:
-                subprocess.run([args.strip, "-g", "-o", tmp.name, image],
-                               check=True)
-                data = tmp.read()
-
+        for exe_path in args.images:
+            breakpoints = image.get_breakpoints(exe_path, args.nm)
+            logging.info("send: %s", exe_path)
+            data = image.strip_image(exe_path, args.strip)
             result = stub.request_run_image(
                 GRPCRunImageRequest(target_id=args.target,
                                     breakpoints=breakpoints,
-                                    path=image,
+                                    path=exe_path,
                                     digest="digest",
                                     data=data,
                                     execution_timeout_in_seconds=args.timeout))
