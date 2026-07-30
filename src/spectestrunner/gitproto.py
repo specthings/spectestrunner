@@ -25,33 +25,19 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 import getpass
-import math
 import re
 import socket
 from typing import Any, Optional
 
 import yaml
 
+from spectestrunner import steps
+
 #: The protocol version of the embedded YAML documents.
 VERSION = 1
 
 #: The request kind which runs a step sequence on a target.
 KIND_RUN_STEPS = "run-steps"
-
-#: The step kind which runs an image on the target.
-STEP_IMAGE = "image"
-
-#: The step kind which requests an action of an agent.
-STEP_ACTION = "action"
-
-#: The step kind which delays the sequence on the bridge.
-STEP_WAIT = "wait"
-
-#: The result status of a step which was not reached.
-STATUS_SKIPPED = "skipped"
-
-#: The prefix of the action status of a successful action.
-ACTION_SUCCESS = "success"
 
 #: The response status of a completed request.
 STATUS_COMPLETED = "completed"
@@ -187,13 +173,13 @@ def decode_message(message: str, marker: str) -> dict[str, Any]:
 
 
 def encode_request(submitter: str, target: str, timeout: float,
-                   steps: list[dict[str, Any]]) -> str:
+                   request_steps: list[dict[str, Any]]) -> str:
     """
     Return the commit message of a run steps request.  The submitter is part
     of the payload so that two submitters cannot derive the same request
     identifier from an otherwise identical request.
     """
-    count = len(steps)
+    count = len(request_steps)
     plural = "" if count == 1 else "s"
     subject = f"spectest: request {count} step{plural} for {target}"
     return encode_message(
@@ -203,7 +189,7 @@ def encode_request(submitter: str, target: str, timeout: float,
             "submitter": submitter,
             "target": target,
             "timeout": timeout,
-            "steps": steps,
+            "steps": request_steps,
         })
 
 
@@ -234,14 +220,10 @@ def _check_action_step(step: dict[str, Any]) -> None:
 
 
 def _check_wait_step(step: dict[str, Any]) -> None:
-    # The bridge sleeps for this long, so an infinite or undefined value
-    # would wedge it for good.
-    seconds = step.get("seconds")
-    if not isinstance(seconds, (int, float)) or isinstance(seconds, bool):
-        raise ProtocolError("a wait step has no 'seconds' number")
-    if not math.isfinite(seconds) or seconds < 0.0:
-        raise ProtocolError(
-            f"a wait step has no finite non-negative 'seconds': {seconds}")
+    try:
+        steps.check_wait_seconds(step.get("seconds"))
+    except ValueError as err:
+        raise ProtocolError(f"a wait step has {err}") from err
 
 
 def check_run_steps_request(payload: dict[str, Any]) -> None:
@@ -250,55 +232,23 @@ def check_run_steps_request(payload: dict[str, Any]) -> None:
         raise ProtocolError("the request has no 'target' string")
     if not isinstance(payload.get("timeout"), (int, float)):
         raise ProtocolError("the request has no 'timeout' number")
-    steps = payload.get("steps")
-    if not isinstance(steps, list) or not steps:
+    request_steps = payload.get("steps")
+    if not isinstance(request_steps, list) or not request_steps:
         raise ProtocolError("the request has no non-empty 'steps' list")
-    for step in steps:
+    for step in request_steps:
         if not isinstance(step, dict):
             raise ProtocolError("a step is no YAML mapping")
         kind = step.get("kind")
-        if kind == STEP_IMAGE:
+        if kind == steps.STEP_IMAGE:
             _check_image_step(step)
-        elif kind == STEP_ACTION:
+        elif kind == steps.STEP_ACTION:
             _check_action_step(step)
-        elif kind == STEP_WAIT:
+        elif kind == steps.STEP_WAIT:
             _check_wait_step(step)
         else:
             raise ProtocolError(f"a step has the unsupported kind '{kind}'")
         if not isinstance(step.get("continue_on_failure", False), bool):
             raise ProtocolError("a step has no 'continue_on_failure' boolean")
-
-
-def describe_step(step: dict[str, Any]) -> str:
-    """
-    Return the step in a human readable form.
-
-    This accepts a step of a request as well as a result of a response, since
-    both carry the kind and the values which name the step.
-    """
-    kind = step.get("kind")
-    if kind == STEP_ACTION:
-        return f"action '{step.get('action')}' for {step.get('uid')}"
-    if kind == STEP_WAIT:
-        return f"wait of {step.get('seconds')} seconds"
-    return f"image {step.get('path')}"
-
-
-def continue_on_failure(step: dict[str, Any]) -> bool:
-    """
-    Return whether the sequence continues after this step failed.
-
-    A failed image step produced the result the request asked for, so the
-    remaining steps still run.  A failed action step falsified the
-    precondition of everything after it, so the sequence stops.
-    """
-    return bool(step.get("continue_on_failure",
-                         step.get("kind") == STEP_IMAGE))
-
-
-def succeeded(status: str) -> bool:
-    """ Return whether the result status of a step indicates success. """
-    return status.startswith(ACTION_SUCCESS)
 
 
 def encode_response(request_id: str,

@@ -34,14 +34,6 @@ from .exitcodes import EXIT_TRANSPORT
 # pylint: disable=no-name-in-module
 from .servicegrpc_pb2_grpc import GRPCServiceStub  # type: ignore
 
-#: The prefix of the status of an action which succeeded.
-ACTION_SUCCESS = "success"
-
-
-def succeeded(status: str) -> bool:
-    """ Return whether the status of an action indicates success. """
-    return status.startswith(ACTION_SUCCESS)
-
 
 def _code_of(err: grpc.RpcError) -> Any:
     """ Return the status code of the error, or None if it has none. """

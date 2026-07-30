@@ -25,7 +25,6 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 import argparse
-import dataclasses
 import logging
 import os
 import signal
@@ -36,71 +35,11 @@ from typing import Any, Optional
 import grpc
 from specitems import get_arguments
 
-from spectestrunner import gitproto, gitwire, image
+from spectestrunner import gitproto, gitwire, image, steps
 from spectestrunner.exitcodes import EXIT_OK
 
 # pylint: disable=no-name-in-module
-from spectestrunner import (  # type: ignore
-    GRPCActionRequest, GRPCRunImageRequest, GRPCServiceStub)
-
-#: The gRPC status codes which justify another attempt.
-TRANSIENT_CODES = frozenset([
-    grpc.StatusCode.UNAVAILABLE,
-    grpc.StatusCode.DEADLINE_EXCEEDED,
-    grpc.StatusCode.RESOURCE_EXHAUSTED,
-    grpc.StatusCode.ABORTED,
-])
-
-#: The extra time granted to a run on top of its execution timeout.
-CALL_TIMEOUT_MARGIN = 60.0
-
-
-class _TransientError(RuntimeError):
-    """ This error indicates that the request should be attempted again. """
-
-
-class _StepError(RuntimeError):
-    """ This error indicates that one step of a request failed for good. """
-
-
-class _Stopped(RuntimeError):
-    """
-    This error indicates that the bridge stopped while it ran a request.
-
-    The request stays pending and is not counted as an attempt, since the
-    stop belongs to the bridge and not to the request.
-    """
-
-
-@dataclasses.dataclass
-class _Context:
-    """ Holds the values which every step of one request shares. """
-    target: str
-    timeout: float
-    data: dict[int, bytes]
-
-
-def _classify(err: grpc.RpcError) -> Exception:
-    """
-    Return the error which corresponds to the gRPC status code.
-
-    A permanent failure belongs to the step and not to the request.  The
-    steps before it ran and may have activated resources, so a rejected
-    response with no results would hide what the request did.
-    """
-    code = err.code() if hasattr(err, "code") else None
-    if code in TRANSIENT_CODES:
-        return _TransientError(f"{code}: {err}")
-    return _StepError(f"{code}: {err}")
-
-
-def _bare_result(step: dict[str, Any], status: str) -> dict[str, Any]:
-    """ Return the result of a step which produced no output of its own. """
-    result: dict[str, Any] = {"kind": step["kind"], "status": status}
-    for key in ("path", "uid", "action", "seconds"):
-        if key in step:
-            result[key] = step[key]
-    return result
+from spectestrunner import GRPCServiceStub  # type: ignore
 
 
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
@@ -182,46 +121,20 @@ class Bridge:
                    payload: dict[str, Any]) -> list[dict[str, Any]]:
         """ Run the steps of the request in order and return the results. """
         gitproto.check_run_steps_request(payload)
-        steps = payload["steps"]
-        context = _Context(target=payload["target"],
-                           timeout=float(payload["timeout"]),
-                           data=self._load_images(commit, steps))
-        results = []
-        stopped = False
-        with grpc.insecure_channel(self.args.server_address) as channel:
-            stub = GRPCServiceStub(channel)
-            for index, step in enumerate(steps):
-                if stopped:
-                    logging.debug("skip step %d of %d: %s", index, len(steps),
-                                  gitproto.describe_step(step))
-                    results.append(_bare_result(step, gitproto.STATUS_SKIPPED))
-                    continue
-                try:
-                    if step["kind"] == gitproto.STEP_ACTION:
-                        result = self._run_action(stub, context, step)
-                    elif step["kind"] == gitproto.STEP_WAIT:
-                        result = self._run_wait(step)
-                    else:
-                        result = self._run_image(stub, context, step, index)
-                except _StepError as err:
-                    result = _bare_result(step, f"error: {err}")
-                results.append(result)
+        request_steps = payload["steps"]
+        context = steps.Context(target=payload["target"],
+                                timeout=float(payload["timeout"]),
+                                data=self._load_images(commit, request_steps))
 
-                # The result of an image step carries the whole output of the
-                # run, so only its status is logged.
-                logging.debug("step %d of %d: %s: status '%s'", index,
-                              len(steps), gitproto.describe_step(step),
-                              result["status"])
-                if not gitproto.succeeded(
-                        result["status"]) and not gitproto.continue_on_failure(
-                            step):
-                    logging.warning("stop after step %d: %s", index,
-                                    result["status"])
-                    stopped = True
-        return results
+        # The channel belongs to the caller, since a sequence which is not
+        # run to its end would otherwise leave it to the garbage collector.
+        with grpc.insecure_channel(self.args.server_address) as channel:
+            return list(
+                steps.run_steps(GRPCServiceStub(channel), context,
+                                request_steps, lambda: self.stop))
 
     def _load_images(self, commit: str,
-                     steps: list[dict[str, Any]]) -> dict[int, bytes]:
+                     request_steps: list[dict[str, Any]]) -> dict[int, bytes]:
         """
         Return the image data of the request by step index.
 
@@ -231,8 +144,8 @@ class Bridge:
         """
         blobs = self.repo.tree_entries(commit)
         data = {}
-        for index, step in enumerate(steps):
-            if step["kind"] != gitproto.STEP_IMAGE:
+        for index, step in enumerate(request_steps):
+            if step["kind"] != steps.STEP_IMAGE:
                 continue
             object_id = blobs.get(step["file"])
             if object_id is None:
@@ -249,114 +162,29 @@ class Bridge:
             data[index] = content
         return data
 
-    def _run_image(self, stub: Any, context: "_Context", step: dict[str, Any],
-                   index: int) -> dict[str, Any]:
-        """ Run one image step and return its result. """
-        data = context.data[index]
-        logging.info("run: %s on %s", step["path"], context.target)
-        response = self._request_run_image(stub, context, step, data)
-        return {
-            "kind":
-            gitproto.STEP_IMAGE,
-            "path":
-            step["path"],
-            "file":
-            gitproto.output_file(index, os.path.basename(step["path"])),
-            "target":
-            response.target_id,
-            "digest":
-            step["digest"],
-            "status":
-            response.status,
-            "load_duration_in_seconds":
-            float(response.load_duration_in_seconds),
-            "execution_duration_in_seconds":
-            float(response.execution_duration_in_seconds),
-            "output":
-            response.output,
-        }
-
-    def _run_wait(self, step: dict[str, Any]) -> dict[str, Any]:
-        """ Delay the sequence and return the result of the wait step. """
-        seconds = float(step["seconds"])
-        logging.info("wait: %ss", seconds)
-        begin = time.monotonic()
-        deadline = begin + seconds
-
-        # Sleep in slices, so that a stop does not have to wait the whole
-        # delay out.  The bridge serves everybody one request after the
-        # other, so a wait holds up the bench for its duration.
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0.0:
-                break
-            if self.stop:
-                raise _Stopped(
-                    f"stopped during the {gitproto.describe_step(step)}")
-            time.sleep(min(1.0, remaining))
-        return {
-            "kind": gitproto.STEP_WAIT,
-            "seconds": seconds,
-            # A response commit is read by people, so keep the resolution of
-            # the elapsed time at a millisecond instead of a float artefact.
-            "waited_in_seconds": round(time.monotonic() - begin, 3),
-            "status": gitproto.ACTION_SUCCESS,
-        }
-
-    def _run_action(self, stub: Any, context: "_Context",
-                    step: dict[str, Any]) -> dict[str, Any]:
-        """ Request one action step and return its result. """
-        logging.info("action: %s for %s", step["action"], step["uid"])
-        response = self._request_action(stub, context, step)
-        return {
-            "kind": gitproto.STEP_ACTION,
-            "uid": step["uid"],
-            "action": step["action"],
-            "status": response.status,
-        }
-
-    @staticmethod
-    def _request_action(stub: Any, context: "_Context",
-                        step: dict[str, Any]) -> Any:
-        # An action without a deadline can wedge the bridge, and the bridge
-        # runs the requests of everybody one after the other.
-        try:
-            return stub.request_action(
-                GRPCActionRequest(uid=step["uid"], action=step["action"]),
-                timeout=context.timeout + CALL_TIMEOUT_MARGIN)
-        except grpc.RpcError as err:
-            raise _classify(err) from err
-
-    @staticmethod
-    def _request_run_image(stub: Any, context: "_Context",
-                           entry: dict[str, Any], data: bytes) -> Any:
-        timeout = context.timeout
-        try:
-            return stub.request_run_image(
-                GRPCRunImageRequest(target_id=context.target,
-                                    breakpoints=entry.get("breakpoints", []),
-                                    path=entry["path"],
-                                    digest=entry["digest"],
-                                    data=data,
-                                    execution_timeout_in_seconds=timeout),
-                timeout=timeout + CALL_TIMEOUT_MARGIN)
-        except grpc.RpcError as err:
-            raise _classify(err) from err
-
     def _push_response(self, request_id: str, status: str,
                        results: list[dict[str, Any]],
                        reason: Optional[str]) -> None:
-        """ Build and push the response commit of the request. """
+        """
+        Build and push the response commit of the request.
+
+        The output of a run goes into a blob of the commit, so the result
+        gains the name of that file here.  A step result on its own carries
+        the bytes and knows nothing about a commit.
+        """
         entries: dict[str, Any] = {}
         payload = []
-        for result in results:
+        for index, result in enumerate(results):
             record = dict(result)
             output = record.pop("output", None)
             if output is not None:
-                entries.setdefault(
-                    gitproto.OUTPUT_DIRECTORY, {})[os.path.basename(
-                        record["file"])] = (gitwire.MODE_FILE,
-                                            self.repo.hash_object(output))
+                file = gitproto.output_file(index,
+                                            os.path.basename(record["path"]))
+                record["file"] = file
+                entries.setdefault(gitproto.OUTPUT_DIRECTORY,
+                                   {})[os.path.basename(file)] = (
+                                       gitwire.MODE_FILE,
+                                       self.repo.hash_object(output))
             payload.append(record)
         message = gitproto.encode_response(request_id, status, payload, reason)
         logging.debug("response message:\n%s", message)
@@ -413,12 +241,12 @@ class Bridge:
             if kind != gitproto.KIND_RUN_STEPS:
                 raise gitproto.ProtocolError(f"unsupported kind '{kind}'")
             results = self._run_steps(request_id, payload)
-        except _Stopped as err:
+        except steps.Stopped as err:
             logging.info("%s, so %s stays pending", err, request_id)
         except gitproto.ProtocolError as err:
             logging.error("reject %s: %s", request_id, err)
             self._publish(request_id, gitproto.STATUS_REJECTED, [], str(err))
-        except (_TransientError, gitwire.GitError) as err:
+        except (steps.TransientError, gitwire.GitError) as err:
             self._count_attempt(request_id, err)
         else:
             if not self._publish(request_id, gitproto.STATUS_COMPLETED,

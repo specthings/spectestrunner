@@ -30,8 +30,9 @@ import sys
 
 from specitems import get_arguments
 
+from spectestrunner import steps
 from spectestrunner.exitcodes import EXIT_ACTION, EXIT_OK
-from spectestrunner.grpcclient import run_with_service, succeeded
+from spectestrunner.grpcclient import run_with_service
 
 # pylint: disable=no-name-in-module
 from spectestrunner import GRPCActionRequest
@@ -71,7 +72,7 @@ def cliaction(argv: list[str] = sys.argv) -> int:
                                            timeout=args.timeout)
             logging.info("action '%s' for %s -> status '%s'", action, uid,
                          response.status)
-            if not succeeded(response.status):
+            if not steps.succeeded(response.status):
                 logging.error("action '%s' for %s failed: %s", action, uid,
                               response.status)
                 status = EXIT_ACTION
