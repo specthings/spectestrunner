@@ -807,6 +807,7 @@ dependencies = [
     { name = "grpcio" },
     { name = "grpcio-tools" },
     { name = "protobuf" },
+    { name = "pyyaml" },
     { name = "specitems" },
 ]
 
@@ -831,6 +832,7 @@ requires-dist = [
     { name = "grpcio", specifier = ">=1.70.0" },
     { name = "grpcio-tools", specifier = ">=1.70.0" },
     { name = "protobuf", specifier = ">=5.29.0,<6.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "specitems", specifier = ">=1.1.14" },
 ]
 

@@ -26,7 +26,7 @@ analyse: $(PY_SRC_FILES) | prepare
 	uv run pylint --disable=duplicate-code $^
 
 check: | prepare
-	true
+	uv run pytest
 
 dist: all
 	uv build

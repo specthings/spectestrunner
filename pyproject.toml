@@ -16,6 +16,7 @@ dependencies = [
     "grpcio >=1.70.0",
     "grpcio-tools >=1.70.0",
     "protobuf (>=5.29.0,<6.0.0)",
+    "pyyaml >=6.0.3",
     "specitems >=1.1.14",
 ]
 keywords = [
@@ -47,6 +48,8 @@ classifiers = [
 
 [project.scripts]
 spectestaction = "spectestrunner.cliaction:cliaction"
+spectestgitbridge = "spectestrunner.cligitbridge:cligitbridge"
+spectestgitrun = "spectestrunner.cligitrun:cligitrun"
 spectestdescribetarget = "spectestrunner.clidescribetarget:clidescribetarget"
 spectestio = "spectestrunner.cliio:cliio"
 spectestlog = "spectestrunner.clilog:clilog"
