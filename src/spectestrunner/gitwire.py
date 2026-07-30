@@ -96,12 +96,25 @@ class Repository:
         return output
 
     def init(self) -> None:
-        """ Create the repository if it does not exist. """
-        if not os.path.isdir(os.path.join(self.git_dir, "objects")):
-            logging.debug("create the repository %s", self.git_dir)
-            os.makedirs(self.git_dir, exist_ok=True)
-            subprocess.run(["git", "init", "--bare", "--quiet", self.git_dir],
-                           check=True)
+        """
+        Create the bare repository if it does not exist.
+
+        The repository belongs to this command, so a directory which holds
+        something else is refused.  A clone of the remote would otherwise gain
+        the files of a bare repository beside its own, and the command would
+        then work in that new repository, which knows none of the remotes of
+        the clone.
+        """
+        if os.path.isdir(os.path.join(self.git_dir, "objects")):
+            return
+        if os.path.isdir(self.git_dir) and os.listdir(self.git_dir):
+            raise GitError(
+                f"'{self.git_dir}' holds something other than the bare "
+                f"repository of this command, so give a path of its own")
+        logging.debug("create the repository %s", self.git_dir)
+        os.makedirs(self.git_dir, exist_ok=True)
+        subprocess.run(["git", "init", "--bare", "--quiet", self.git_dir],
+                       check=True)
 
     def hash_object(self, data: bytes) -> str:
         """ Write the data as a blob and return its object identifier. """

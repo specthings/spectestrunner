@@ -117,6 +117,16 @@ It prepares the executables exactly like `spectestrun` does, commits them,
 pushes the commit, waits for the response commit, and reports the results.  See
 the *Git mediated transport* section below.
 
+The `--remote` is a URL and not the name of a remote.  The command works in a
+bare repository of its own, which has no remotes to look a name up in.  A local
+remote therefore reads `--remote=file:///path/to/bench.git`.
+
+That repository is a temporary directory unless `--work-dir` names one, in
+which case the command creates it and owns it.  Do not point it at a clone of
+the remote; the command refuses a directory which holds anything else.  Naming
+one is worth it for a large executable, since the objects of the previous
+requests are then still there.
+
 Use `--no-wait` to print the request identifier and exit, and `--collect` to
 report the response of a request which was submitted before.
 

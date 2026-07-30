@@ -128,3 +128,29 @@ def test_init_does_not_touch_an_existing_repository(repo):
     repo.init()
     assert repo.blob(object_id) == b"data"
     assert os.path.isdir(os.path.join(repo.git_dir, "objects"))
+
+
+def test_a_work_directory_which_is_not_ours(tmp_path):
+    """
+    A directory which holds something else is no repository of the command.
+
+    A clone of the remote would otherwise gain the files of a bare repository
+    beside its own, and the command would work in that one, which knows none
+    of the remotes of the clone.
+    """
+    clone = tmp_path / "clone"
+    (clone / ".git").mkdir(parents=True)
+    repo = gitwire.Repository(str(clone))
+    with pytest.raises(gitwire.GitError, match="path of its own"):
+        repo.init()
+    assert sorted(item.name for item in clone.iterdir()) == [".git"]
+
+
+def test_an_empty_work_directory_is_ours(tmp_path):
+    """ An empty directory becomes the bare repository of the command. """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    repo = gitwire.Repository(str(empty))
+    repo.init()
+    repo.init()
+    assert (empty / "objects").is_dir()
