@@ -78,10 +78,29 @@ def test_unparsable_nm_lines_are_skipped(tmp_path, exe):
     assert image.get_symbols(exe, nm) == {"bsp_reset": [0x1000]}
 
 
+def test_an_nm_which_cannot_be_run(tmp_path, exe):
+    """ An nm tool which does not exist is an error of its own. """
+    with pytest.raises(image.ImageError, match="could not run"):
+        image.get_symbols(exe, str(tmp_path / "no-such-nm"))
+
+
 def test_strip_image(tmp_path, exe):
     """ The stripped image is read back from the temporary file. """
     strip = _tool(tmp_path / "strip", '#!/bin/sh\ncp "$4" "$3"\n')
     assert image.strip_image(exe, strip) == b"\x7fELF-ticker"
+
+
+def test_a_strip_which_fails(tmp_path, exe):
+    """ A strip tool which reports a failure is an error. """
+    strip = _tool(tmp_path / "strip", "#!/bin/sh\nexit 1\n")
+    with pytest.raises(image.ImageError, match="could not strip"):
+        image.strip_image(exe, strip)
+
+
+def test_a_strip_which_cannot_be_run(tmp_path, exe):
+    """ A strip tool which does not exist is an error. """
+    with pytest.raises(image.ImageError, match="could not strip"):
+        image.strip_image(exe, str(tmp_path / "no-such-strip"))
 
 
 def test_digest():

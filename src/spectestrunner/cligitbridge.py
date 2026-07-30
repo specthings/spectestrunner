@@ -37,6 +37,7 @@ import grpc
 from specitems import get_arguments
 
 from spectestrunner import gitproto, gitwire, image
+from spectestrunner.exitcodes import EXIT_OK
 
 # pylint: disable=no-name-in-module
 from spectestrunner import (  # type: ignore
@@ -467,4 +468,4 @@ def cligitbridge(argv: list[str] = sys.argv) -> int:
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, _stop)
     bridge.run()
-    return 0
+    return EXIT_OK

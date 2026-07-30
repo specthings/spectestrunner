@@ -32,8 +32,17 @@ import tempfile
 BREAKPOINT_SYMBOL = "bsp_reset"
 
 
+class ImageError(RuntimeError):
+    """ This error indicates that an executable could not be prepared. """
+
+
 def get_symbols(exe_path: str, nm_path: str) -> dict[str, list[int]]:
-    """ Return the symbols of the executable using the nm tool. """
+    """
+    Return the symbols of the executable using the nm tool.
+
+    An executable without a symbol table has no symbols, while a tool which
+    cannot be run at all is an error of the command line.
+    """
     try:
         result = subprocess.run([nm_path, exe_path],
                                 check=True,
@@ -41,6 +50,8 @@ def get_symbols(exe_path: str, nm_path: str) -> dict[str, list[int]]:
                                 text=True)
     except subprocess.CalledProcessError:
         return {}
+    except OSError as err:
+        raise ImageError(f"could not run '{nm_path}': {err}") from err
     symbols: dict[str, list[int]] = {}
     for line in result.stdout.split("\n"):
         try:
@@ -65,8 +76,11 @@ def get_breakpoints(exe_path: str, nm_path: str) -> list[int]:
 def strip_image(exe_path: str, strip_path: str) -> bytes:
     """ Return the executable stripped of its debug information. """
     with tempfile.NamedTemporaryFile() as tmp:
-        subprocess.run([strip_path, "-g", "-o", tmp.name, exe_path],
-                       check=True)
+        try:
+            subprocess.run([strip_path, "-g", "-o", tmp.name, exe_path],
+                           check=True)
+        except (subprocess.CalledProcessError, OSError) as err:
+            raise ImageError(f"could not strip '{exe_path}': {err}") from err
         return tmp.read()
 
 

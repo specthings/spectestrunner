@@ -425,7 +425,16 @@ def test_fail_on_status(bench, capsys):
 
 def test_no_steps(bench):
     """ Submitting without steps fails. """
-    assert bench.submit() == cligitrun.EXIT_GIT
+    assert bench.submit() == cligitrun.EXIT_USAGE
+
+
+def test_an_image_which_cannot_be_stripped(bench, capsys):
+    """ An image which cannot be prepared is reported before the push. """
+    assert bench.submit("--no-wait",
+                        images=[str(bench.tmp_path / "no-such.exe")
+                                ]) == cligitrun.EXIT_USAGE
+    assert "could not strip" in capsys.readouterr().err
+    assert not bench.refs()
 
 
 _PEER = "/service/some-peer"
@@ -454,6 +463,19 @@ def _sequence(bench, *extra):
         "--action",
         f"{_PEER}:deactivate",
     )
+
+
+def test_permanent_grpc_failure_of_an_action(bench, capsys):
+    """ A non-transient gRPC failure of an action fails the step. """
+    assert bench.submit("--no-wait", "--action",
+                        f"{_PEER}:status") == cligitrun.EXIT_OK
+    request_id = capsys.readouterr().out.strip()
+    _Stub.error = _RpcError(grpc.StatusCode.INVALID_ARGUMENT)
+    bench.bridge()
+
+    results = _results(bench, request_id)
+    assert results[0]["kind"] == gitproto.STEP_ACTION
+    assert "INVALID_ARGUMENT" in results[0]["status"]
 
 
 def test_action_and_image_sequence(bench, capsys):
@@ -561,14 +583,14 @@ def test_positionals_do_not_mix_with_step_options(bench, capsys):
                         "--action",
                         f"{_PEER}:status",
                         images=[bench.image("a.exe",
-                                            b"a")]) == cligitrun.EXIT_GIT
+                                            b"a")]) == cligitrun.EXIT_USAGE
     assert "no defined order" in capsys.readouterr().err
 
 
 def test_malformed_action_argument(bench, capsys):
     """ An action option which is no uid and action pair fails. """
     assert bench.submit("--no-wait", "--action",
-                        "just-a-uid") == cligitrun.EXIT_GIT
+                        "just-a-uid") == cligitrun.EXIT_USAGE
     assert "is no <uid>:<action>" in capsys.readouterr().err
 
 
@@ -641,11 +663,11 @@ def test_a_permanent_step_failure_keeps_the_earlier_results(bench, capsys):
     assert bench.submit("--collect", request_id) == cligitrun.EXIT_OK
 
 
-def test_failure_policy_needs_a_preceding_step(bench):
+def test_failure_policy_needs_a_preceding_step(bench, capsys):
     """ A failure policy option before any step is a usage error. """
-    with pytest.raises(SystemExit):
-        bench.submit("--stop-on-failure", "--image",
-                     bench.image("a.exe", b"a"))
+    assert bench.submit("--stop-on-failure", "--image",
+                        bench.image("a.exe", b"a")) == cligitrun.EXIT_USAGE
+    assert "--stop-on-failure has no preceding step" in capsys.readouterr().err
 
 
 def test_unknown_remote(bench, tmp_path):

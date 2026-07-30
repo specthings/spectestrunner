@@ -26,12 +26,14 @@
 
 import argparse
 import sys
-import grpc
 
 from specitems import get_arguments
 
+from spectestrunner.exitcodes import EXIT_OK
+from spectestrunner.grpcclient import run_with_service, take_stream
+
 # pylint: disable=no-name-in-module
-from spectestrunner import GRPCLogRequest, GRPCServiceStub
+from spectestrunner import GRPCLogRequest
 
 
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
@@ -40,6 +42,14 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
         parser.add_argument("--server-address",
                             help="the server address",
                             default="localhost:50051")
+        parser.add_argument("--max-lines",
+                            help="stop after this many responses",
+                            type=int,
+                            default=None)
+        parser.add_argument("--timeout",
+                            help="stop after this many seconds",
+                            type=float,
+                            default=None)
         parser.add_argument("logger_name",
                             metavar="LOGGER_NAME",
                             help="if no logger name is specified, "
@@ -51,15 +61,17 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                          add_arguments=(_add_arguments, ))
 
 
-def clilog(argv: list[str] = sys.argv):
+def clilog(argv: list[str] = sys.argv) -> int:
     """ Get logging from a test server through gRPC. """
     args = _get_arguments(argv[1:])
-    with grpc.insecure_channel(args.server_address) as channel:
-        stub = GRPCServiceStub(channel)
-        if args.logger_name:
-            logger_name = args.logger_name[0]
-        else:
-            logger_name = ""
-        responses = stub.request_log(GRPCLogRequest(logger_name=logger_name))
-        for response in responses:
+
+    def _work(stub) -> int:
+        # The argument has nargs="?", so it is a string and not a list.
+        logger_name = args.logger_name if args.logger_name else ""
+        responses = stub.request_log(GRPCLogRequest(logger_name=logger_name),
+                                     timeout=args.timeout)
+        for response in take_stream(responses, args.max_lines):
             print(response.data)
+        return EXIT_OK
+
+    return run_with_service(args.server_address, _work)

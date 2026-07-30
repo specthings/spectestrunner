@@ -27,12 +27,14 @@
 import argparse
 import logging
 import sys
-import grpc
 
 from specitems import get_arguments
 
+from spectestrunner.exitcodes import EXIT_ACTION, EXIT_OK
+from spectestrunner.grpcclient import run_with_service, succeeded
+
 # pylint: disable=no-name-in-module
-from spectestrunner import GRPCActionRequest, GRPCServiceStub
+from spectestrunner import GRPCActionRequest
 
 
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
@@ -44,7 +46,7 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                             default=180.0)
         parser.add_argument("--server-address",
                             help="the server address",
-                            default="iris:50051")
+                            default="localhost:50051")
         parser.add_argument(
             "requests",
             metavar="REQUEST",
@@ -56,14 +58,23 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                          add_arguments=(_add_arguments, ))
 
 
-def cliaction(argv: list[str] = sys.argv):
+def cliaction(argv: list[str] = sys.argv) -> int:
     """ Request an action on a test server through gRPC. """
     args = _get_arguments(argv[1:])
-    with grpc.insecure_channel(args.server_address) as channel:
-        stub = GRPCServiceStub(channel)
+
+    def _work(stub) -> int:
+        status = EXIT_OK
         for request in args.requests:
             uid, _, action = request.partition(":")
-            response = stub.request_action(
-                GRPCActionRequest(uid=uid, action=action))
+            response = stub.request_action(GRPCActionRequest(uid=uid,
+                                                             action=action),
+                                           timeout=args.timeout)
             logging.info("action '%s' for %s -> status '%s'", action, uid,
                          response.status)
+            if not succeeded(response.status):
+                logging.error("action '%s' for %s failed: %s", action, uid,
+                              response.status)
+                status = EXIT_ACTION
+        return status
+
+    return run_with_service(args.server_address, _work)
