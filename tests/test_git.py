@@ -885,3 +885,118 @@ def test_answered_check_survives_a_broken_remote(bench, tmp_path):
         _arguments(bench, remote=str(tmp_path / "missing.git")))
     # pylint: disable=protected-access
     assert bridge._is_answered("0" * 40) is False
+
+
+def test_wait_step_delays_the_sequence(bench, capsys):
+    """ A wait step delays the bridge and reports what it waited. """
+    exe = bench.image("ticker.exe", b"one")
+    assert bench.submit("--no-wait", "--image", exe, "--wait",
+                        "0.05") == cligitrun.EXIT_OK
+    request_id = capsys.readouterr().out.strip()
+
+    begin = time.monotonic()
+    bench.bridge()
+    assert time.monotonic() - begin >= 0.05
+
+    results = _results(bench, request_id)
+    assert [result["kind"] for result in results
+            ] == [gitproto.STEP_IMAGE, gitproto.STEP_WAIT]
+    assert results[1]["seconds"] == 0.05
+    assert results[1]["waited_in_seconds"] >= 0.05
+    assert results[1]["status"] == gitproto.ACTION_SUCCESS
+
+    assert bench.submit("--collect", request_id) == cligitrun.EXIT_OK
+    assert "wait of 0.05 seconds -> waited" in capsys.readouterr().err
+
+
+def test_wait_step_keeps_its_place_in_the_sequence(bench, capsys):
+    """ A wait runs where the command line puts it. """
+    assert bench.submit("--no-wait", "--wait", "0", "--action",
+                        f"{_PEER}:status", "--wait", "0") == cligitrun.EXIT_OK
+    request_id = capsys.readouterr().out.strip()
+    bench.bridge()
+    assert [result["kind"] for result in _results(bench, request_id)] == [
+        gitproto.STEP_WAIT, gitproto.STEP_ACTION, gitproto.STEP_WAIT
+    ]
+
+
+def test_wait_step_is_skipped_after_a_failed_action(bench, capsys):
+    """ A wait after a failed action does not delay the bridge. """
+    _Stub.action_status = {"status": "error: no such agent"}
+    assert bench.submit("--no-wait", "--action", f"{_PEER}:status", "--wait",
+                        "30") == cligitrun.EXIT_OK
+    request_id = capsys.readouterr().out.strip()
+    bench.bridge()
+
+    results = _results(bench, request_id)
+    assert results[1]["kind"] == gitproto.STEP_WAIT
+    assert results[1]["status"] == gitproto.STATUS_SKIPPED
+
+    # The skipped result still shows what the step would have waited.
+    assert results[1]["seconds"] == 30.0
+    assert bench.submit("--collect", request_id) == cligitrun.EXIT_ACTION
+    assert "skipped: wait of 30.0 seconds" in capsys.readouterr().err
+
+
+def test_wait_step_stops_with_the_bridge(bench, capsys, monkeypatch):
+    """ A stop during a wait leaves the request pending and un-attempted. """
+    assert bench.submit("--no-wait", "--wait", "3600") == cligitrun.EXIT_OK
+    request_id = capsys.readouterr().out.strip()
+
+    # The bridge installs the handler which stops it, so signal it for real
+    # instead of reaching into the instance.
+    def _signal_the_bridge(_seconds):
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    monkeypatch.setattr(cligitbridge.time, "sleep", _signal_the_bridge)
+    assert bench.bridge() == 0
+
+    # No response and no attempt, so the next run of the bridge picks it up.
+    assert gitproto.response_ref(request_id) not in bench.refs()
+    assert "stays pending" in capsys.readouterr().err
+
+
+def test_wait_which_is_no_number(bench):
+    """ A wait which is no number is reported before anything is pushed. """
+    assert bench.submit("--no-wait", "--wait", "soon") == cligitrun.EXIT_USAGE
+    assert not bench.refs()
+
+
+def test_wait_which_is_not_finite(bench):
+    """ A wait which is not finite is reported. """
+    assert bench.submit("--no-wait", "--wait", "inf") == cligitrun.EXIT_USAGE
+    assert bench.submit("--no-wait", "--wait", "-1") == cligitrun.EXIT_USAGE
+    assert not bench.refs()
+
+
+@pytest.mark.parametrize("seconds, reason", [
+    ("soon", "no 'seconds' number"),
+    (True, "no 'seconds' number"),
+    (float("inf"), "no finite non-negative 'seconds'"),
+    (-1.0, "no finite non-negative 'seconds'"),
+])
+def test_wait_of_a_crafted_request_is_rejected(bench, seconds, reason):
+    """
+    A wait which the bridge cannot honour rejects the request.  The submitter
+    refuses such a wait, so only a hand crafted request carries one.
+    """
+    hand = bench.hand()
+    steps = [{"kind": gitproto.STEP_WAIT, "seconds": seconds}]
+    message = gitproto.encode_request("tester", "aarch64/zynqmp_apu", 180.0,
+                                      steps)
+    commit = hand.commit_tree(hand.make_tree({}), message)
+    bench.push(commit, gitproto.request_ref("tester", commit))
+    bench.bridge()
+
+    repo = gitwire.Repository(str(bench.tmp_path / "bridge.git"))
+    response = bench.refs()[gitproto.response_ref(commit)]
+    payload = gitproto.decode_response(repo.commit_message(response))
+    assert payload["status"] == gitproto.STATUS_REJECTED
+    assert reason in payload["reason"]
+
+
+def test_the_waits_may_outlast_the_wait_timeout(bench, capsys):
+    """ Waits which are longer than the response wait are reported. """
+    assert bench.submit("--wait-timeout", "0.05", "--wait", "0", "--wait",
+                        "0.2") == cligitrun.EXIT_TIMEOUT
+    assert "longer than the wait timeout" in capsys.readouterr().err
