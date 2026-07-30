@@ -46,6 +46,27 @@ It prepares the executable exactly like `spectestrun` does, commits it, pushes
 the commit, waits for the response commit, and prints the results.  See the
 *Git mediated transport* section below.
 
+Use `--image`, `--action` and `--wait` to build a sequence of steps which runs
+in the order of the command line, for example:
+
+```
+spectestgitrun --remote=git@host:bench.git --target=aarch64/zynqmp_apu \
+  --action=/service/some-peer:activate:bc --image=bc.exe --wait=5 \
+  --image=rt.exe --action=/service/some-peer:deactivate
+```
+
+A `--wait` step delays the sequence on the bridge, which is useful to let the
+hardware settle between two runs.  The bridge serves the requests of everybody
+one after the other, so **a wait holds up the whole bench for its duration**.
+Keep the waits short and remember that the bridge has no limit of its own.
+
+A wait which is longer than `--wait-timeout` makes the command give up before
+the response arrives.  The command warns about this, and the response is still
+collectable later with `--collect`.
+
+Note that `--wait` used to be an unambiguous abbreviation of `--wait-timeout`
+and now appends a step instead.  Spell `--wait-timeout` out.
+
 ### Command - spectestgitbridge
 
 The `spectestgitbridge` command polls a Git remote for requests and answers
@@ -180,22 +201,32 @@ files below `images/` in the commit.  The submitter runs `nm` and `strip`
 locally, so the bridge host needs no target toolchain.
 
 ```
-spectest: request 1 image for aarch64/zynqmp_apu
+spectest: request 3 steps for aarch64/zynqmp_apu
 
 --- spectest-request ---
 version: 1
-kind: run-images
+kind: run-steps
 submitter: sebhub-at-workstation
 target: aarch64/zynqmp_apu
 timeout: 180.0
-images:
-- path: build/ticker.exe
+steps:
+- kind: image
+  path: build/ticker.exe
   file: images/0000-ticker.exe
   digest: sha256:3f8a2c1e...
   breakpoints:
   - 4096
+- kind: wait
+  seconds: 5.0
+- kind: action
+  uid: /service/some-peer
+  action: deactivate
 --- end ---
 ```
+
+The `steps` run in the order of the list.  A step of the `image` kind runs an
+executable, one of the `action` kind requests an action of an agent, and one of
+the `wait` kind delays the sequence on the bridge.
 
 ### Response commit
 
@@ -215,6 +246,11 @@ After `--max-attempts` failed attempts the request is rejected as well.
 A retry repeats the whole batch, so an image which already ran before a later
 image of the same request failed transiently runs again.  Keep this in mind for
 tests with side effects.
+
+A stop of the bridge during a wait leaves the request pending without counting
+an attempt, so the next run of the bridge repeats the whole request.  A long
+wait therefore widens the window in which a restart repeats the steps which
+already ran.
 
 The bridge creates a response reference with a lease so that it fails instead
 of overwriting a response which another bridge pushed first.  Git enforces fast

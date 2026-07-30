@@ -27,6 +27,7 @@
 import argparse
 import contextlib
 import logging
+import math
 import os
 import sys
 import tempfile
@@ -55,14 +56,20 @@ class _BadUsage(RuntimeError):
     """ This error indicates that the command line is not usable. """
 
 
+#: The step kind of each option which appends a step.
+_STEP_KIND_BY_OPTION = {
+    "--action": gitproto.STEP_ACTION,
+    "--image": gitproto.STEP_IMAGE,
+    "--wait": gitproto.STEP_WAIT,
+}
+
+
 class _Step(argparse.Action):  # pylint: disable=too-few-public-methods
     """ Append the option value to the ordered step list. """
 
     def __call__(self, parser, namespace, values, option_string=None):
-        kind = (gitproto.STEP_ACTION
-                if option_string == "--action" else gitproto.STEP_IMAGE)
         namespace.steps.append({
-            "kind": kind,
+            "kind": _STEP_KIND_BY_OPTION[option_string],
             "value": values,
             "continue_on_failure": None,
         })
@@ -139,6 +146,14 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                             dest="steps",
                             action=_Step,
                             help="append an image step to the sequence")
+        # The value stays a string so that a malformed one yields the exit
+        # code of the command instead of the exit code of argparse.
+        parser.add_argument("--wait",
+                            metavar="SECONDS",
+                            dest="steps",
+                            action=_Step,
+                            help="append a step which delays the sequence "
+                            "on the bridge")
         parser.add_argument("--continue-on-failure",
                             dest="steps",
                             action=_OnFailure,
@@ -192,6 +207,17 @@ def _make_action_step(value: str) -> dict[str, Any]:
     return {"kind": gitproto.STEP_ACTION, "uid": uid, "action": action}
 
 
+def _make_wait_step(value: str) -> dict[str, Any]:
+    try:
+        seconds = float(value)
+    except ValueError:
+        # pylint: disable=raise-missing-from
+        raise _BadUsage(f"'{value}' is no number of seconds to wait")
+    if not math.isfinite(seconds) or seconds < 0.0:
+        raise _BadUsage(f"'{value}' is no finite non-negative wait")
+    return {"kind": gitproto.STEP_WAIT, "seconds": seconds}
+
+
 def _make_image_step(repo: gitwire.Repository, args: argparse.Namespace,
                      entries: dict[str, Any], index: int,
                      exe_path: str) -> dict[str, Any]:
@@ -210,6 +236,24 @@ def _make_image_step(repo: gitwire.Repository, args: argparse.Namespace,
     }
 
 
+def _warn_about_the_waits(args: argparse.Namespace,
+                          steps: list[dict[str, Any]]) -> None:
+    """
+    Warn if the waits alone outlast the response wait of the submitter.
+
+    The images and the actions take time as well, so this is a lower bound.
+    """
+    if args.no_wait:
+        return
+    total = math.fsum(step["seconds"] for step in steps
+                      if step["kind"] == gitproto.STEP_WAIT)
+    if total > args.wait_timeout:
+        logging.warning(
+            "the waits alone take %ss, which is longer than the wait timeout "
+            "of %ss, so collect the response later with --collect", total,
+            args.wait_timeout)
+
+
 def _submit(repo: gitwire.Repository, args: argparse.Namespace) -> str:
     """ Push a request commit and return its identifier. """
     steps = []
@@ -217,12 +261,15 @@ def _submit(repo: gitwire.Repository, args: argparse.Namespace) -> str:
     for index, wanted in enumerate(_get_steps(args)):
         if wanted["kind"] == gitproto.STEP_ACTION:
             step = _make_action_step(wanted["value"])
+        elif wanted["kind"] == gitproto.STEP_WAIT:
+            step = _make_wait_step(wanted["value"])
         else:
             step = _make_image_step(repo, args, entries, index,
                                     wanted["value"])
         if wanted["continue_on_failure"] is not None:
             step["continue_on_failure"] = wanted["continue_on_failure"]
         steps.append(step)
+    _warn_about_the_waits(args, steps)
     message = gitproto.encode_request(args.submitter, args.target,
                                       args.timeout, steps)
     logging.debug("request message:\n%s", message)
@@ -262,24 +309,22 @@ def _wait_for_response(repo: gitwire.Repository, args: argparse.Namespace,
             min(args.poll_interval, max(0.0, deadline - time.monotonic())))
 
 
-def _describe(result: dict[str, Any]) -> str:
-    """ Return the step of the result in a human readable form. """
-    if result.get("kind") == gitproto.STEP_ACTION:
-        return f"action '{result.get('action')}' for {result.get('uid')}"
-    return f"image {result.get('path')}"
-
-
 def _report(repo: gitwire.Repository, commit: str, payload: dict[str,
                                                                  Any]) -> None:
     """ Print the results the same way the spectestrun command does. """
     blobs = repo.tree_entries(commit)
     for result in payload["results"]:
         if result.get("status") == gitproto.STATUS_SKIPPED:
-            logging.warning("skipped: %s", _describe(result))
+            logging.warning("skipped: %s", gitproto.describe_step(result))
             continue
         if result.get("kind") == gitproto.STEP_ACTION:
-            logging.info("%s -> status '%s'", _describe(result),
+            logging.info("%s -> status '%s'", gitproto.describe_step(result),
                          result.get("status"))
+            continue
+        if result.get("kind") == gitproto.STEP_WAIT:
+            logging.info("%s -> waited %s seconds",
+                         gitproto.describe_step(result),
+                         result.get("waited_in_seconds"))
             continue
         logging.info("received result for: %s", result.get("path"))
         logging.info("result status: %s", result.get("status"))
@@ -315,11 +360,13 @@ def _exit_status(args: argparse.Namespace, payload: dict[str, Any]) -> int:
         if (result.get("kind") == gitproto.STEP_ACTION
                 and status != gitproto.STATUS_SKIPPED
                 and not gitproto.succeeded(status)):
-            logging.error("%s failed: %s", _describe(result), status)
+            logging.error("%s failed: %s", gitproto.describe_step(result),
+                          status)
             return EXIT_ACTION
+    # Only a run of an image reports a status which the caller can expect.
     if args.fail_on_status is not None and any(
             result.get("status") != args.fail_on_status for result in results
-            if result.get("kind") != gitproto.STEP_ACTION):
+            if result.get("kind") == gitproto.STEP_IMAGE):
         return EXIT_STATUS
     return EXIT_OK
 

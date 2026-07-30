@@ -63,6 +63,15 @@ class _StepError(RuntimeError):
     """ This error indicates that one step of a request failed for good. """
 
 
+class _Stopped(RuntimeError):
+    """
+    This error indicates that the bridge stopped while it ran a request.
+
+    The request stays pending and is not counted as an attempt, since the
+    stop belongs to the bridge and not to the request.
+    """
+
+
 @dataclasses.dataclass
 class _Context:
     """ Holds the values which every step of one request shares. """
@@ -85,17 +94,10 @@ def _classify(err: grpc.RpcError) -> Exception:
     return _StepError(f"{code}: {err}")
 
 
-def _describe(step: dict[str, Any]) -> str:
-    """ Return the step in a human readable form. """
-    if step["kind"] == gitproto.STEP_ACTION:
-        return f"action '{step['action']}' for {step['uid']}"
-    return f"image {step['path']}"
-
-
 def _bare_result(step: dict[str, Any], status: str) -> dict[str, Any]:
     """ Return the result of a step which produced no output of its own. """
-    result = {"kind": step["kind"], "status": status}
-    for key in ("path", "uid", "action"):
+    result: dict[str, Any] = {"kind": step["kind"], "status": status}
+    for key in ("path", "uid", "action", "seconds"):
         if key in step:
             result[key] = step[key]
     return result
@@ -191,12 +193,14 @@ class Bridge:
             for index, step in enumerate(steps):
                 if stopped:
                     logging.debug("skip step %d of %d: %s", index, len(steps),
-                                  _describe(step))
+                                  gitproto.describe_step(step))
                     results.append(_bare_result(step, gitproto.STATUS_SKIPPED))
                     continue
                 try:
                     if step["kind"] == gitproto.STEP_ACTION:
                         result = self._run_action(stub, context, step)
+                    elif step["kind"] == gitproto.STEP_WAIT:
+                        result = self._run_wait(step)
                     else:
                         result = self._run_image(stub, context, step, index)
                 except _StepError as err:
@@ -206,7 +210,8 @@ class Bridge:
                 # The result of an image step carries the whole output of the
                 # run, so only its status is logged.
                 logging.debug("step %d of %d: %s: status '%s'", index,
-                              len(steps), _describe(step), result["status"])
+                              len(steps), gitproto.describe_step(step),
+                              result["status"])
                 if not gitproto.succeeded(
                         result["status"]) and not gitproto.continue_on_failure(
                             step):
@@ -269,6 +274,33 @@ class Bridge:
             float(response.execution_duration_in_seconds),
             "output":
             response.output,
+        }
+
+    def _run_wait(self, step: dict[str, Any]) -> dict[str, Any]:
+        """ Delay the sequence and return the result of the wait step. """
+        seconds = float(step["seconds"])
+        logging.info("wait: %ss", seconds)
+        begin = time.monotonic()
+        deadline = begin + seconds
+
+        # Sleep in slices, so that a stop does not have to wait the whole
+        # delay out.  The bridge serves everybody one request after the
+        # other, so a wait holds up the bench for its duration.
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            if self.stop:
+                raise _Stopped(
+                    f"stopped during the {gitproto.describe_step(step)}")
+            time.sleep(min(1.0, remaining))
+        return {
+            "kind": gitproto.STEP_WAIT,
+            "seconds": seconds,
+            # A response commit is read by people, so keep the resolution of
+            # the elapsed time at a millisecond instead of a float artefact.
+            "waited_in_seconds": round(time.monotonic() - begin, 3),
+            "status": gitproto.ACTION_SUCCESS,
         }
 
     def _run_action(self, stub: Any, context: "_Context",
@@ -381,6 +413,8 @@ class Bridge:
             if kind != gitproto.KIND_RUN_STEPS:
                 raise gitproto.ProtocolError(f"unsupported kind '{kind}'")
             results = self._run_steps(request_id, payload)
+        except _Stopped as err:
+            logging.info("%s, so %s stays pending", err, request_id)
         except gitproto.ProtocolError as err:
             logging.error("reject %s: %s", request_id, err)
             self._publish(request_id, gitproto.STATUS_REJECTED, [], str(err))
