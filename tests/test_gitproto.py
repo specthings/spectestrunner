@@ -26,10 +26,10 @@
 
 import pytest
 
-from spectestrunner import gitproto
+from spectestrunner import gitproto, steps
 
 _IMAGE_STEP = {
-    "kind": gitproto.STEP_IMAGE,
+    "kind": steps.STEP_IMAGE,
     "path": "build/ticker.exe",
     "file": "images/0000-ticker.exe",
     "digest": "sha256:00",
@@ -37,7 +37,7 @@ _IMAGE_STEP = {
 }
 
 _ACTION_STEP = {
-    "kind": gitproto.STEP_ACTION,
+    "kind": steps.STEP_ACTION,
     "uid": "/service/some-peer",
     "action": "activate:bc:600",
 }
@@ -45,15 +45,15 @@ _ACTION_STEP = {
 
 def test_request_round_trip():
     """ A request survives encoding and decoding. """
-    steps = [_ACTION_STEP, _IMAGE_STEP]
+    request_steps = [_ACTION_STEP, _IMAGE_STEP]
     message = gitproto.encode_request("tester", "aarch64/zynqmp_apu", 180.0,
-                                      steps)
+                                      request_steps)
     assert message.startswith(
         "spectest: request 2 steps for aarch64/zynqmp_apu\n\n")
     payload = gitproto.decode_request(message)
     assert payload["kind"] == gitproto.KIND_RUN_STEPS
     assert payload["target"] == "aarch64/zynqmp_apu"
-    assert payload["steps"] == steps
+    assert payload["steps"] == request_steps
     gitproto.check_run_steps_request(payload)
 
 
@@ -83,7 +83,7 @@ def test_trailers_do_not_break_the_block():
 ])
 def test_continue_on_failure(step, expected):
     """ The failure policy defaults to the step kind and can be overridden. """
-    assert gitproto.continue_on_failure(step) is expected
+    assert steps.continue_on_failure(step) is expected
 
 
 @pytest.mark.parametrize("status, expected", [
@@ -95,7 +95,7 @@ def test_continue_on_failure(step, expected):
 ])
 def test_succeeded(status, expected):
     """ Only a status with the success sentinel counts as success. """
-    assert gitproto.succeeded(status) is expected
+    assert steps.succeeded(status) is expected
 
 
 def test_response_round_trip():
@@ -155,22 +155,22 @@ def _request(*steps):
         "path": "a"
     }),
     _request({
-        "kind": gitproto.STEP_IMAGE,
+        "kind": steps.STEP_IMAGE,
         "path": "a"
     }),
     _request({
-        "kind": gitproto.STEP_IMAGE,
+        "kind": steps.STEP_IMAGE,
         "path": "a",
         "file": "f",
         "digest": "d",
         "breakpoints": ["x"]
     }),
     _request({
-        "kind": gitproto.STEP_ACTION,
+        "kind": steps.STEP_ACTION,
         "uid": "/a"
     }),
     _request({
-        "kind": gitproto.STEP_ACTION,
+        "kind": steps.STEP_ACTION,
         "uid": "/a",
         "action": ""
     }),

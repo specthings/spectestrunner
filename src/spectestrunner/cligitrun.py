@@ -36,7 +36,7 @@ from typing import Any, Iterator, Optional
 
 from specitems import get_arguments
 
-from spectestrunner import gitproto, gitwire, image
+from spectestrunner import gitproto, gitwire, image, steps
 
 # pylint: disable=unused-import
 from spectestrunner.exitcodes import (  # noqa: F401
@@ -52,42 +52,6 @@ class _RequestGone(RuntimeError):
     """ This error indicates that the request no longer exists. """
 
 
-class _BadUsage(RuntimeError):
-    """ This error indicates that the command line is not usable. """
-
-
-#: The step kind of each option which appends a step.
-_STEP_KIND_BY_OPTION = {
-    "--action": gitproto.STEP_ACTION,
-    "--image": gitproto.STEP_IMAGE,
-    "--wait": gitproto.STEP_WAIT,
-}
-
-
-class _Step(argparse.Action):  # pylint: disable=too-few-public-methods
-    """ Append the option value to the ordered step list. """
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        namespace.steps.append({
-            "kind": _STEP_KIND_BY_OPTION[option_string],
-            "value": values,
-            "continue_on_failure": None,
-        })
-
-
-class _OnFailure(argparse.Action):  # pylint: disable=too-few-public-methods
-    """ Set the failure policy of the preceding step. """
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        # The command reports its own usage errors, so record the problem
-        # instead of letting argparse exit while it parses.
-        if not namespace.steps:
-            namespace.bad_usage = f"{option_string} has no preceding step"
-            return
-        namespace.steps[-1]["continue_on_failure"] = (
-            option_string == "--continue-on-failure")
-
-
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
 
     def _add_arguments(parser):
@@ -100,13 +64,6 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
         parser.add_argument("--work-dir",
                             help="the local Git repository of the submitter",
                             default=None)
-        parser.add_argument("--target",
-                            help="the target identifier",
-                            default="/does/not/exist")
-        parser.add_argument("--timeout",
-                            help="the execution timeout",
-                            type=float,
-                            default=180.0)
         parser.add_argument("--wait-timeout",
                             help="the timeout to wait for a response",
                             type=float,
@@ -121,52 +78,7 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
         parser.add_argument("--collect",
                             help="collect the response of this request",
                             default=None)
-        parser.add_argument(
-            "--fail-on-status",
-            help="exit with a non-zero status if a run reports another status",
-            default=None)
-        parser.add_argument("--nm",
-                            help="the path to the nm tool",
-                            default="nm")
-        parser.add_argument("--strip",
-                            help="the path to the strip tool",
-                            default="strip")
-        # The step options share one destination so that their order on the
-        # command line is the order of the sequence.  The default belongs to
-        # the parser rather than to the first of them, which would make the
-        # order of the add_argument calls significant.
-        parser.set_defaults(steps=[], bad_usage=None)
-        parser.add_argument("--action",
-                            metavar="UID:ACTION",
-                            dest="steps",
-                            action=_Step,
-                            help="append an action step to the sequence")
-        parser.add_argument("--image",
-                            metavar="IMAGE",
-                            dest="steps",
-                            action=_Step,
-                            help="append an image step to the sequence")
-        # The value stays a string so that a malformed one yields the exit
-        # code of the command instead of the exit code of argparse.
-        parser.add_argument("--wait",
-                            metavar="SECONDS",
-                            dest="steps",
-                            action=_Step,
-                            help="append a step which delays the sequence "
-                            "on the bridge")
-        parser.add_argument("--continue-on-failure",
-                            dest="steps",
-                            action=_OnFailure,
-                            nargs=0,
-                            help="run the following steps although the "
-                            "preceding step failed")
-        parser.add_argument("--stop-on-failure",
-                            dest="steps",
-                            action=_OnFailure,
-                            nargs=0,
-                            help="skip the following steps if the preceding "
-                            "step failed")
-        parser.add_argument("images", nargs="*")
+        steps.add_arguments(parser)
 
     return get_arguments(argv,
                          description=cligitrun.__doc__,
@@ -186,58 +98,8 @@ def _repository(work_dir: Optional[str]) -> Iterator[gitwire.Repository]:
         yield repo
 
 
-def _get_steps(args: argparse.Namespace) -> list[dict[str, Any]]:
-    """ Return the ordered steps of the command line. """
-    if args.images:
-        if args.steps:
-            raise _BadUsage("the image positionals have no defined order "
-                            "with respect to the step options, use --image")
-        return [{
-            "kind": gitproto.STEP_IMAGE,
-            "value": exe_path,
-            "continue_on_failure": None,
-        } for exe_path in args.images]
-    return args.steps
-
-
-def _make_action_step(value: str) -> dict[str, Any]:
-    uid, _, action = value.partition(":")
-    if not uid or not action:
-        raise _BadUsage(f"'{value}' is no <uid>:<action> action")
-    return {"kind": gitproto.STEP_ACTION, "uid": uid, "action": action}
-
-
-def _make_wait_step(value: str) -> dict[str, Any]:
-    try:
-        seconds = float(value)
-    except ValueError:
-        # pylint: disable=raise-missing-from
-        raise _BadUsage(f"'{value}' is no number of seconds to wait")
-    if not math.isfinite(seconds) or seconds < 0.0:
-        raise _BadUsage(f"'{value}' is no finite non-negative wait")
-    return {"kind": gitproto.STEP_WAIT, "seconds": seconds}
-
-
-def _make_image_step(repo: gitwire.Repository, args: argparse.Namespace,
-                     entries: dict[str, Any], index: int,
-                     exe_path: str) -> dict[str, Any]:
-    data = image.strip_image(exe_path, args.strip)
-    file = gitproto.image_file(index, os.path.basename(exe_path))
-    entries.setdefault(gitproto.IMAGE_DIRECTORY,
-                       {})[os.path.basename(file)] = (gitwire.MODE_EXECUTABLE,
-                                                      repo.hash_object(data))
-    logging.info("prepared: %s", exe_path)
-    return {
-        "kind": gitproto.STEP_IMAGE,
-        "path": exe_path,
-        "file": file,
-        "digest": image.get_digest(data),
-        "breakpoints": image.get_breakpoints(exe_path, args.nm),
-    }
-
-
 def _warn_about_the_waits(args: argparse.Namespace,
-                          steps: list[dict[str, Any]]) -> None:
+                          request_steps: list[dict[str, Any]]) -> None:
     """
     Warn if the waits alone outlast the response wait of the submitter.
 
@@ -245,8 +107,8 @@ def _warn_about_the_waits(args: argparse.Namespace,
     """
     if args.no_wait:
         return
-    total = math.fsum(step["seconds"] for step in steps
-                      if step["kind"] == gitproto.STEP_WAIT)
+    total = math.fsum(step["seconds"] for step in request_steps
+                      if step["kind"] == steps.STEP_WAIT)
     if total > args.wait_timeout:
         logging.warning(
             "the waits alone take %ss, which is longer than the wait timeout "
@@ -256,22 +118,22 @@ def _warn_about_the_waits(args: argparse.Namespace,
 
 def _submit(repo: gitwire.Repository, args: argparse.Namespace) -> str:
     """ Push a request commit and return its identifier. """
-    steps = []
+    request_steps, data = steps.build_steps(args)
+
+    # Only a commit stores an image as a file, so the step gains the name of
+    # that file here rather than where the sequence is built.
     entries: dict[str, Any] = {}
-    for index, wanted in enumerate(_get_steps(args)):
-        if wanted["kind"] == gitproto.STEP_ACTION:
-            step = _make_action_step(wanted["value"])
-        elif wanted["kind"] == gitproto.STEP_WAIT:
-            step = _make_wait_step(wanted["value"])
-        else:
-            step = _make_image_step(repo, args, entries, index,
-                                    wanted["value"])
-        if wanted["continue_on_failure"] is not None:
-            step["continue_on_failure"] = wanted["continue_on_failure"]
-        steps.append(step)
-    _warn_about_the_waits(args, steps)
+    for index, content in data.items():
+        file = gitproto.image_file(
+            index, os.path.basename(request_steps[index]["path"]))
+        request_steps[index]["file"] = file
+        entries.setdefault(
+            gitproto.IMAGE_DIRECTORY,
+            {})[os.path.basename(file)] = (gitwire.MODE_EXECUTABLE,
+                                           repo.hash_object(content))
+    _warn_about_the_waits(args, request_steps)
     message = gitproto.encode_request(args.submitter, args.target,
-                                      args.timeout, steps)
+                                      args.timeout, request_steps)
     logging.debug("request message:\n%s", message)
     request_id = repo.commit_tree(repo.make_tree(entries), message)
     ref = gitproto.request_ref(args.submitter, request_id)
@@ -311,30 +173,19 @@ def _wait_for_response(repo: gitwire.Repository, args: argparse.Namespace,
 
 def _report(repo: gitwire.Repository, commit: str, payload: dict[str,
                                                                  Any]) -> None:
-    """ Print the results the same way the spectestrun command does. """
+    """
+    Report the results of the response.
+
+    The output of a run lives in a blob of the response commit, so it is read
+    back into the result.  A result carries the bytes everywhere else, which
+    is what the reporting of a step expects.
+    """
     blobs = repo.tree_entries(commit)
     for result in payload["results"]:
-        if result.get("status") == gitproto.STATUS_SKIPPED:
-            logging.warning("skipped: %s", gitproto.describe_step(result))
-            continue
-        if result.get("kind") == gitproto.STEP_ACTION:
-            logging.info("%s -> status '%s'", gitproto.describe_step(result),
-                         result.get("status"))
-            continue
-        if result.get("kind") == gitproto.STEP_WAIT:
-            logging.info("%s -> waited %s seconds",
-                         gitproto.describe_step(result),
-                         result.get("waited_in_seconds"))
-            continue
-        logging.info("received result for: %s", result.get("path"))
-        logging.info("result status: %s", result.get("status"))
-        logging.info("load duration in seconds: %s",
-                     result.get("load_duration_in_seconds"))
-        logging.info("execution duration in seconds: %s",
-                     result.get("execution_duration_in_seconds"))
         object_id = blobs.get(result.get("file", ""))
         if object_id is not None:
-            print(repo.blob(object_id).decode("latin-1"))
+            result["output"] = repo.blob(object_id)
+        steps.report_result(result)
 
 
 def _cleanup(repo: gitwire.Repository, args: argparse.Namespace,
@@ -350,25 +201,12 @@ def _cleanup(repo: gitwire.Repository, args: argparse.Namespace,
 
 
 def _exit_status(args: argparse.Namespace, payload: dict[str, Any]) -> int:
+    """ Return the exit code of the response. """
     if payload["status"] == gitproto.STATUS_REJECTED:
         logging.error("request rejected: %s",
                       payload.get("reason", "no reason given"))
         return EXIT_REJECTED
-    results = payload["results"]
-    for result in results:
-        status = result.get("status", "")
-        if (result.get("kind") == gitproto.STEP_ACTION
-                and status != gitproto.STATUS_SKIPPED
-                and not gitproto.succeeded(status)):
-            logging.error("%s failed: %s", gitproto.describe_step(result),
-                          status)
-            return EXIT_ACTION
-    # Only a run of an image reports a status which the caller can expect.
-    if args.fail_on_status is not None and any(
-            result.get("status") != args.fail_on_status for result in results
-            if result.get("kind") == gitproto.STEP_IMAGE):
-        return EXIT_STATUS
-    return EXIT_OK
+    return steps.exit_status(payload["results"], args.fail_on_status)
 
 
 def _round_trip(repo: gitwire.Repository, args: argparse.Namespace) -> int:
@@ -394,26 +232,20 @@ def _round_trip(repo: gitwire.Repository, args: argparse.Namespace) -> int:
     return _exit_status(args, payload)
 
 
-def _usage_error(args: argparse.Namespace) -> Optional[str]:
-    """ Return the reason why the command line is not usable, if any. """
-    if args.bad_usage is not None:
-        return args.bad_usage
-    if args.collect is None and not args.images and not args.steps:
-        return "no steps given"
-    return None
-
-
 def cligitrun(argv: list[str] = sys.argv) -> int:
     """ Run a step sequence on a test server through a Git repository. """
     args = _get_arguments(argv[1:])
-    reason = _usage_error(args)
+
+    # A collection needs no steps of its own, since it reports the response
+    # of a request which was submitted before.
+    reason = steps.usage_error(args, need_steps=args.collect is None)
     if reason is not None:
         logging.error("%s", reason)
         return EXIT_USAGE
     try:
         with _repository(args.work_dir) as repo:
             return _round_trip(repo, args)
-    except (_BadUsage, image.ImageError) as err:
+    except (steps.UsageError, image.ImageError) as err:
         logging.error("%s", err)
         return EXIT_USAGE
     except _RequestGone as err:

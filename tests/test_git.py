@@ -34,7 +34,8 @@ import time
 import grpc
 import pytest
 
-from spectestrunner import cligitbridge, cligitrun, gitproto, gitwire, image
+from spectestrunner import (cligitbridge, cligitrun, gitproto, gitwire, image,
+                            steps)
 
 _NM = """#!/bin/sh
 echo "0000000000001000 T bsp_reset"
@@ -321,7 +322,7 @@ def test_digest_mismatch_is_rejected(bench, capsys):
     message = gitproto.encode_request(
         "tester", "aarch64/zynqmp_apu", 1.0,
         [{
-            "kind": gitproto.STEP_IMAGE,
+            "kind": steps.STEP_IMAGE,
             "path": "t.exe",
             "file": "images/0000-t.exe",
             "digest": image.get_digest(b"expected"),
@@ -474,7 +475,7 @@ def test_permanent_grpc_failure_of_an_action(bench, capsys):
     bench.bridge()
 
     results = _results(bench, request_id)
-    assert results[0]["kind"] == gitproto.STEP_ACTION
+    assert results[0]["kind"] == steps.STEP_ACTION
     assert "INVALID_ARGUMENT" in results[0]["status"]
 
 
@@ -493,8 +494,8 @@ def test_action_and_image_sequence(bench, capsys):
     ]
     results = _results(bench, request_id)
     assert [result["kind"] for result in results] == [
-        gitproto.STEP_ACTION, gitproto.STEP_IMAGE, gitproto.STEP_ACTION,
-        gitproto.STEP_IMAGE, gitproto.STEP_ACTION
+        steps.STEP_ACTION, steps.STEP_IMAGE, steps.STEP_ACTION,
+        steps.STEP_IMAGE, steps.STEP_ACTION
     ]
     assert results[0]["uid"] == _PEER
     assert results[0]["status"] == "success: done activate:bc:600"
@@ -521,8 +522,8 @@ def test_failed_action_skips_the_remaining_steps(bench, capsys):
     ] == ["activate:bc:600", "bc.exe", "activate:rt-4"]
     results = _results(bench, request_id)
     assert [result["status"] for result in results][2:] == [
-        "error: no command for 'rt-4'", gitproto.STATUS_SKIPPED,
-        gitproto.STATUS_SKIPPED
+        "error: no command for 'rt-4'", steps.STATUS_SKIPPED,
+        steps.STATUS_SKIPPED
     ]
     assert results[3]["path"] == bench.image("rt.exe", b"rt")
     assert results[4]["action"] == "deactivate"
@@ -557,7 +558,7 @@ def test_failed_image_does_not_stop_the_sequence(bench, capsys):
     bench.bridge()
 
     assert len(_Stub.requests) == 2
-    assert gitproto.STATUS_SKIPPED not in [
+    assert steps.STATUS_SKIPPED not in [
         result["status"] for result in _results(bench, request_id)
     ]
     assert bench.submit("--collect", request_id) == cligitrun.EXIT_OK
@@ -573,7 +574,7 @@ def test_image_can_be_told_to_stop_the_sequence(bench, capsys):
 
     assert len(_Stub.requests) == 1
     results = _results(bench, request_id)
-    assert results[1]["status"] == gitproto.STATUS_SKIPPED
+    assert results[1]["status"] == steps.STATUS_SKIPPED
     assert bench.submit("--collect", request_id) == cligitrun.EXIT_OK
 
 
@@ -600,11 +601,11 @@ def test_a_rejected_request_runs_no_step(bench):
     message = gitproto.encode_request(
         "tester", "aarch64/zynqmp_apu", 1.0,
         [{
-            "kind": gitproto.STEP_ACTION,
+            "kind": steps.STEP_ACTION,
             "uid": _PEER,
             "action": "activate:bc",
         }, {
-            "kind": gitproto.STEP_IMAGE,
+            "kind": steps.STEP_IMAGE,
             "path": "t.exe",
             "file": "images/0001-t.exe",
             "digest": image.get_digest(b"expected"),
@@ -658,9 +659,12 @@ def test_a_permanent_step_failure_keeps_the_earlier_results(bench, capsys):
     # the request would leave the peer active with an empty transcript.
     results = _results(bench, request_id)
     assert results[0]["status"] == "success: done activate:bc"
-    assert results[1]["kind"] == gitproto.STEP_IMAGE
+    assert results[1]["kind"] == steps.STEP_IMAGE
+    assert results[1]["status"].startswith(steps.STATUS_UNREACHED)
     assert "INVALID_ARGUMENT" in results[1]["status"]
-    assert bench.submit("--collect", request_id) == cligitrun.EXIT_OK
+
+    # The image never ran, so its absent status is not a passing run.
+    assert bench.submit("--collect", request_id) == cligitrun.EXIT_TRANSPORT
 
 
 def test_failure_policy_needs_a_preceding_step(bench, capsys):
@@ -739,7 +743,7 @@ def test_missing_image_blob_is_rejected(bench):
     message = gitproto.encode_request(
         "tester", "aarch64/zynqmp_apu", 1.0,
         [{
-            "kind": gitproto.STEP_IMAGE,
+            "kind": steps.STEP_IMAGE,
             "path": "t.exe",
             "file": "images/0000-missing.exe",
             "digest": image.get_digest(b"whatever"),
@@ -817,7 +821,7 @@ def test_missing_output_blob_and_cleanup_failure(bench, capsys):
     message = gitproto.encode_response(
         "a" * 40, gitproto.STATUS_COMPLETED,
         [{
-            "kind": gitproto.STEP_IMAGE,
+            "kind": steps.STEP_IMAGE,
             "path": "t.exe",
             "file": "output/0000-gone.out",
             "status": "success",
@@ -899,11 +903,11 @@ def test_wait_step_delays_the_sequence(bench, capsys):
     assert time.monotonic() - begin >= 0.05
 
     results = _results(bench, request_id)
-    assert [result["kind"] for result in results
-            ] == [gitproto.STEP_IMAGE, gitproto.STEP_WAIT]
+    assert [result["kind"]
+            for result in results] == [steps.STEP_IMAGE, steps.STEP_WAIT]
     assert results[1]["seconds"] == 0.05
     assert results[1]["waited_in_seconds"] >= 0.05
-    assert results[1]["status"] == gitproto.ACTION_SUCCESS
+    assert results[1]["status"] == steps.ACTION_SUCCESS
 
     assert bench.submit("--collect", request_id) == cligitrun.EXIT_OK
     assert "wait of 0.05 seconds -> waited" in capsys.readouterr().err
@@ -915,9 +919,8 @@ def test_wait_step_keeps_its_place_in_the_sequence(bench, capsys):
                         f"{_PEER}:status", "--wait", "0") == cligitrun.EXIT_OK
     request_id = capsys.readouterr().out.strip()
     bench.bridge()
-    assert [result["kind"] for result in _results(bench, request_id)] == [
-        gitproto.STEP_WAIT, gitproto.STEP_ACTION, gitproto.STEP_WAIT
-    ]
+    assert [result["kind"] for result in _results(bench, request_id)
+            ] == [steps.STEP_WAIT, steps.STEP_ACTION, steps.STEP_WAIT]
 
 
 def test_wait_step_is_skipped_after_a_failed_action(bench, capsys):
@@ -929,8 +932,8 @@ def test_wait_step_is_skipped_after_a_failed_action(bench, capsys):
     bench.bridge()
 
     results = _results(bench, request_id)
-    assert results[1]["kind"] == gitproto.STEP_WAIT
-    assert results[1]["status"] == gitproto.STATUS_SKIPPED
+    assert results[1]["kind"] == steps.STEP_WAIT
+    assert results[1]["status"] == steps.STATUS_SKIPPED
 
     # The skipped result still shows what the step would have waited.
     assert results[1]["seconds"] == 30.0
@@ -948,7 +951,7 @@ def test_wait_step_stops_with_the_bridge(bench, capsys, monkeypatch):
     def _signal_the_bridge(_seconds):
         os.kill(os.getpid(), signal.SIGTERM)
 
-    monkeypatch.setattr(cligitbridge.time, "sleep", _signal_the_bridge)
+    monkeypatch.setattr(steps.time, "sleep", _signal_the_bridge)
     assert bench.bridge() == 0
 
     # No response and no attempt, so the next run of the bridge picks it up.
@@ -981,9 +984,9 @@ def test_wait_of_a_crafted_request_is_rejected(bench, seconds, reason):
     refuses such a wait, so only a hand crafted request carries one.
     """
     hand = bench.hand()
-    steps = [{"kind": gitproto.STEP_WAIT, "seconds": seconds}]
+    request_steps = [{"kind": steps.STEP_WAIT, "seconds": seconds}]
     message = gitproto.encode_request("tester", "aarch64/zynqmp_apu", 180.0,
-                                      steps)
+                                      request_steps)
     commit = hand.commit_tree(hand.make_tree({}), message)
     bench.push(commit, gitproto.request_ref("tester", commit))
     bench.bridge()
