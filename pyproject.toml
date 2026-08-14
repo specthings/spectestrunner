@@ -5,7 +5,7 @@
 [project]
 name = "spectestrunner"
 version = "0.9.4.dev1"
-description = "Provides a client and sever to run test executables."
+description = "Provides a client to run test executables on a test server."
 authors = [
     {name = "The spectestrunner Authors", email = "specthings@embedded-brains.de"}
 ]
