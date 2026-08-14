@@ -805,7 +805,6 @@ version = "0.9.4.dev1"
 source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
-    { name = "grpcio-tools" },
     { name = "protobuf" },
     { name = "pyyaml" },
     { name = "specitems" },
@@ -816,6 +815,7 @@ dev = [
     { name = "coverage" },
     { name = "flake8" },
     { name = "grpc-stubs" },
+    { name = "grpcio-tools" },
     { name = "mypy" },
     { name = "pylint" },
     { name = "pytest" },
@@ -830,7 +830,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "grpcio", specifier = ">=1.70.0" },
-    { name = "grpcio-tools", specifier = ">=1.70.0" },
     { name = "protobuf", specifier = ">=5.29.0,<6.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "specitems", specifier = ">=1.1.14" },
@@ -841,6 +840,7 @@ dev = [
     { name = "coverage", specifier = ">=7.13.3" },
     { name = "flake8", specifier = ">=7.3.0" },
     { name = "grpc-stubs", specifier = ">=1.53.0.5" },
+    { name = "grpcio-tools", specifier = ">=1.70.0" },
     { name = "mypy", specifier = ">=1.19.1" },
     { name = "pylint", specifier = ">=4.0.4" },
     { name = "pytest", specifier = ">=9.0.2" },

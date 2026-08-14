@@ -14,7 +14,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "grpcio >=1.70.0",
-    "grpcio-tools >=1.70.0",
     "protobuf (>=5.29.0,<6.0.0)",
     "pyyaml >=6.0.3",
     "specitems >=1.1.14",
@@ -64,6 +63,7 @@ dev = [
     "coverage>=7.13.3",
     "flake8>=7.3.0",
     "grpc-stubs>=1.53.0.5",
+    "grpcio-tools >=1.70.0",
     "mypy>=1.19.1",
     "pylint>=4.0.4",
     "pytest-cov>=7.0.0",
