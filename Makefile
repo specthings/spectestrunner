@@ -26,7 +26,7 @@ analyse: $(PY_SRC_FILES) | prepare
 	uv run pylint --disable=duplicate-code $^
 
 check: | prepare
-	uv run pytest
+	uv run pytest -n auto --cov-fail-under=100
 
 dist: all
 	uv build

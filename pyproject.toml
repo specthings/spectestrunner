@@ -77,4 +77,4 @@ dev = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "--cov=spectestrunner --cov-fail-under=80 --cov-branch --cov-report=term-missing --cov-config=.coveragerc"
+addopts = "--cov=spectestrunner --cov-branch --cov-report=term-missing --cov-config=.coveragerc"
