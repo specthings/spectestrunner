@@ -6,10 +6,9 @@ Copyright (C) 2026 embedded brains GmbH & Co. KG
 
 ## Overview
 
-The *spectestrunner* Python package provides a client and sever to run test
-executables.  The package uses the specification item framework provided by
-[specitems](https://github.com/specthings/specitems)
-for the server configuration.
+The *spectestrunner* Python package provides commands and modules which run
+test executables on a test server.  The package provides the protocol
+definitions.
 
 The package is maintained by the
 [specthings](https://github.com/specthings)
@@ -162,44 +161,24 @@ The command exits with a non-zero status if an action reports an error.
 
 ### Activation leases
 
-An agent item may have an `activation-lease-in-seconds` attribute.  If it is
-present and the value is neither null nor zero, then activations of the agent
-have a lease.  Once the lease expires, the agent deactivates the resource of
-the most recent activation.  This limits the time a resource stays claimed by a
-client which crashed or forgot to release it.
-
-Only the most recent activation is covered by a lease.  Use the attribute for
-agents which provide one resource at a time, not for an agent which holds
-several resources at once.
-
-Activating an already active agent renews the lease.  There is no separate
-renew action.  Clients hold a resource by repeating the activation, for example
+An agent of the test server may hold a resource under a lease which expires
+unless a client renews it.  A client renews a lease by repeating the
+activation, for example
 
 ```
 spectestaction --server-address=foobar:50051 /service/some-peer:activate:bc:600
 ```
 
-every few minutes.  The optional third field overrides the lease of the item
-for this activation.  A value of zero activates without a lease.
-
-The `status` action returns the activation state and the remaining lease
-without changing either:
-
-```
-spectestaction --server-address=foobar:50051 /service/some-peer:status
-```
-
-The activation name selects the resource of the agent.  For a subprocess input
-agent with a `command-by-name` attribute the name selects the command to run,
-so activating with another name terminates the running subprocess and runs the
-command of the new name.  Since such an agent runs at most one subprocess, the
-names are mutually exclusive by construction.
+every few minutes.  The optional third field is the lease in seconds and
+overrides the one of the agent.  A value of zero activates without a lease.
+What an agent does with a lease is documented by
+[spectestserver](https://github.com/specthings/spectestserver).
 
 ### Command - spectestlog
 
-The `spectestlog` command displays the test server log messages.  Logs from
-multiprocessing processes are not displayed.  We have to change the logging
-handlers to make this work.
+The `spectestlog` command displays the test server log messages.  Every agent
+runs as a thread of the test server, so the messages of all of them are
+displayed.
 
 The command streams until it is interrupted.  Use `--max-lines` to stop after a
 number of messages and `--timeout` to stop after a number of seconds, so that
@@ -212,12 +191,6 @@ progress.
 
 The command streams until it is interrupted.  Use `--max-lines` to stop after a
 number of responses and `--timeout` to stop after a number of seconds.
-
-### Command - spectestserver
-
-The `spectestserver` command runs the test server.  You have to provide a
-server configuration.  The command exits with 7 if the specification of the
-server is not valid.
 
 ### Exit codes
 
