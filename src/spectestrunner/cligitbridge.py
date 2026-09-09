@@ -36,10 +36,13 @@ import grpc
 from specitems import get_arguments
 
 from spectestrunner import gitproto, gitwire, image, steps
-from spectestrunner.exitcodes import EXIT_OK
+from spectestrunner.exitcodes import EXIT_INTERRUPTED, EXIT_OK, EXIT_TRANSPORT
 
 # pylint: disable=no-name-in-module
 from spectestrunner import GRPCServiceStub  # type: ignore
+
+#: The reason of the response of a discarded request.
+_DISCARD_REASON = "the operator discarded all queued requests"
 
 
 def _get_arguments(argv: list[str]) -> argparse.Namespace:
@@ -68,6 +71,9 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                             default=3)
         parser.add_argument("--once",
                             help="process the pending requests and exit",
+                            action="store_true")
+        parser.add_argument("--discard",
+                            help="discard the queued requests and exit",
                             action="store_true")
 
     return get_arguments(argv,
@@ -315,6 +321,28 @@ class Bridge:
             self._process(request_id)
         self._reap(requests, responses)
 
+    def discard(self) -> int:
+        """
+        Reject every queued request and return the number which survive.
+
+        The response commit needs no object of the request, so the remote
+        references are enough and the queue is never fetched.
+        """
+        requests, responses = _classify(
+            self.repo.remote_refs(self.args.remote, gitproto.REF_PATTERN))
+        pending = sorted(_pending(requests, responses))
+        discarded = 0
+        for request_id in pending:
+            if self.stop:
+                logging.debug("stop before %s", request_id)
+                break
+            if self._publish(request_id, gitproto.STATUS_REJECTED, [],
+                             _DISCARD_REASON):
+                discarded += 1
+        logging.info("discarded %d of %d queued requests", discarded,
+                     len(pending))
+        return len(pending) - discarded
+
     def run(self) -> None:
         """ Poll the remote until the process is asked to stop. """
         while not self.stop:
@@ -329,16 +357,32 @@ class Bridge:
                 time.sleep(min(1.0, deadline - time.monotonic()))
 
 
+def _discard(bridge: Bridge) -> int:
+    """ Discard the queue and return the exit code of the command. """
+    try:
+        survivors = bridge.discard()
+    except gitwire.GitError as err:
+        logging.error("%s", err)
+        return EXIT_TRANSPORT
+    if not survivors:
+        return EXIT_OK
+    if bridge.stop:
+        return EXIT_INTERRUPTED
+    return EXIT_TRANSPORT
+
+
 def cligitbridge(argv: list[str] = sys.argv) -> int:
     """ Bridge a Git repository to a test server. """
     args = _get_arguments(argv[1:])
     bridge = Bridge(args)
 
     def _stop(_signum, _frame):
-        logging.info("stop requested, finishing the current run")
+        logging.info("stop requested, finishing the current request")
         bridge.stop = True
 
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, _stop)
+    if args.discard:
+        return _discard(bridge)
     bridge.run()
     return EXIT_OK
