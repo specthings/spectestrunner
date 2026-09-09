@@ -75,6 +75,40 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                          add_arguments=(_add_arguments, ))
 
 
+def _classify(
+        refs: dict[str, str]) -> tuple[dict[str, list[str]], dict[str, str]]:
+    """ Return the request references and responses of the reference map. """
+    requests: dict[str, list[str]] = {}
+    responses: dict[str, str] = {}
+    for ref, commit in refs.items():
+        if ref.startswith(gitproto.REQUESTS_PREFIX + "/"):
+            try:
+                _, request_id = gitproto.split_request_ref(ref)
+            except gitproto.ProtocolError as err:
+                logging.warning("ignoring %s: %s", ref, err)
+                continue
+            if request_id != commit:
+                logging.warning(
+                    "ignoring %s: it does not name its own "
+                    "commit %s", ref, commit)
+                continue
+            requests.setdefault(request_id, []).append(ref)
+        elif ref.startswith(gitproto.RESPONSES_PREFIX + "/"):
+            try:
+                responses[gitproto.split_response_ref(ref)] = commit
+            except gitproto.ProtocolError as err:
+                logging.warning("ignoring %s: %s", ref, err)
+    return requests, responses
+
+
+def _pending(requests: dict[str, list[str]],
+             responses: dict[str, str]) -> list[str]:
+    """ Return the identifiers of the requests which have no response. """
+    return [
+        request_id for request_id in requests if request_id not in responses
+    ]
+
+
 class Bridge:
     """ Polls a Git remote for requests and answers them through gRPC. """
 
@@ -95,27 +129,7 @@ class Bridge:
                             f"+{gitproto.REF_PATTERN}:{gitproto.REF_PATTERN}",
                             prune=True)
             local = self.repo.local_refs(gitproto.REF_PREFIX)
-        requests: dict[str, list[str]] = {}
-        responses: dict[str, str] = {}
-        for ref, commit in local.items():
-            if ref.startswith(gitproto.REQUESTS_PREFIX + "/"):
-                try:
-                    _, request_id = gitproto.split_request_ref(ref)
-                except gitproto.ProtocolError as err:
-                    logging.warning("ignoring %s: %s", ref, err)
-                    continue
-                if request_id != commit:
-                    logging.warning(
-                        "ignoring %s: it does not name its own "
-                        "commit %s", ref, commit)
-                    continue
-                requests.setdefault(request_id, []).append(ref)
-            elif ref.startswith(gitproto.RESPONSES_PREFIX + "/"):
-                try:
-                    responses[gitproto.split_response_ref(ref)] = commit
-                except gitproto.ProtocolError as err:
-                    logging.warning("ignoring %s: %s", ref, err)
-        return requests, responses
+        return _classify(local)
 
     def _run_steps(self, commit: str,
                    payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -289,10 +303,7 @@ class Bridge:
     def tick(self) -> None:
         """ Poll the remote once and process everything which is pending. """
         requests, responses = self._refs()
-        pending = [
-            request_id for request_id in requests
-            if request_id not in responses
-        ]
+        pending = _pending(requests, responses)
         pending.sort(
             key=lambda request_id: (-self._age(request_id), request_id))
         logging.debug("tick: %d requests, %d answered, pending %s",
