@@ -36,6 +36,7 @@ import pytest
 
 from spectestrunner import (cligitbridge, cligitrun, gitproto, gitwire, image,
                             steps)
+from spectestrunner.exitcodes import EXIT_INTERRUPTED, EXIT_OK, EXIT_TRANSPORT
 
 _NM = """#!/bin/sh
 echo "0000000000001000 T bsp_reset"
@@ -185,6 +186,13 @@ def _bench(tmp_path, monkeypatch):
             return cligitbridge.cligitbridge([
                 "spectestgitbridge", "--remote", self.remote, "--work-dir",
                 str(tmp_path / "bridge.git"), "--once", *extra
+            ])
+
+        def discard(self, *extra):
+            """ Run the bridge in the discard mode. """
+            return cligitbridge.cligitbridge([
+                "spectestgitbridge", "--remote", self.remote, "--work-dir",
+                str(tmp_path / "bridge.git"), "--discard", *extra
             ])
 
         def refs(self):
@@ -693,6 +701,7 @@ def _arguments(bench, **overrides):
         "response_retention": 1e9,
         "max_attempts": 3,
         "once": True,
+        "discard": False,
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -1003,3 +1012,101 @@ def test_the_waits_may_outlast_the_wait_timeout(bench, capsys):
     assert bench.submit("--wait-timeout", "0.05", "--wait", "0", "--wait",
                         "0.2") == cligitrun.EXIT_TIMEOUT
     assert "longer than the wait timeout" in capsys.readouterr().err
+
+
+def _discarded(bench, request_id):
+    """ Return the response payload of the discarded request. """
+    repo = gitwire.Repository(str(bench.tmp_path / "bridge.git"))
+    commit = bench.refs()[gitproto.response_ref(request_id)]
+    return gitproto.decode_response(repo.commit_message(commit))
+
+
+def test_discard_rejects_the_queue(bench, capsys):
+    """ Every queued request is answered with a rejected response. """
+    bench.submit("--no-wait", images=[bench.image("a.exe", b"a")])
+    first = capsys.readouterr().out.strip()
+    bench.submit("--no-wait", images=[bench.image("b.exe", b"b")])
+    second = capsys.readouterr().out.strip()
+
+    assert bench.discard() == EXIT_OK
+    assert "discarded 2 of 2 queued requests" in capsys.readouterr().err
+    for request_id in (first, second):
+        payload = _discarded(bench, request_id)
+        assert payload["status"] == gitproto.STATUS_REJECTED
+        assert payload[
+            "reason"] == "the operator discarded all queued requests"
+        assert bench.submit("--collect", request_id) == cligitrun.EXIT_REJECTED
+
+
+def test_discard_touches_no_object_and_no_server(bench, capsys):
+    """ The discard neither fetches the queue nor reaches the server. """
+    bench.submit("--no-wait", images=[bench.image("a.exe", b"a")])
+    request_id = capsys.readouterr().out.strip()
+
+    assert bench.discard() == EXIT_OK
+    assert not _Stub.requests
+    repo = gitwire.Repository(str(bench.tmp_path / "bridge.git"))
+    with pytest.raises(gitwire.GitError):
+        repo.commit_message(request_id)
+
+
+def test_discard_of_an_empty_queue(bench, capsys):
+    """ A discard without a queued request reports what it did. """
+    assert bench.discard() == EXIT_OK
+    assert "discarded 0 of 0 queued requests" in capsys.readouterr().err
+
+
+def test_discard_leaves_an_answered_request(bench, capsys):
+    """ A request which has a response is no longer queued. """
+    bench.submit("--no-wait", images=[bench.image("a.exe", b"a")])
+    request_id = capsys.readouterr().out.strip()
+    bench.bridge()
+    answer = bench.refs()[gitproto.response_ref(request_id)]
+
+    assert bench.discard() == EXIT_OK
+    assert "discarded 0 of 0 queued requests" in capsys.readouterr().err
+    assert bench.refs()[gitproto.response_ref(request_id)] == answer
+
+
+def test_discard_reports_a_refused_response(bench, capsys):
+    """ A request whose response is refused survives the discard. """
+    bench.submit("--no-wait", images=[bench.image("a.exe", b"a")])
+    capsys.readouterr()
+    bench.deny_responses()
+
+    assert bench.discard() == EXIT_TRANSPORT
+    assert "discarded 0 of 1 queued requests" in capsys.readouterr().err
+
+
+def test_discard_reports_a_broken_remote(bench, tmp_path, capsys):
+    """ A remote which cannot be listed fails the discard. """
+    assert cligitbridge.cligitbridge([
+        "spectestgitbridge", "--remote",
+        str(tmp_path / "missing.git"), "--work-dir",
+        str(tmp_path / "bridge.git"), "--discard"
+    ]) == EXIT_TRANSPORT
+    assert "ls-remote" in capsys.readouterr().err
+
+
+def test_discard_stops_between_requests(bench, capsys):
+    """ A discard which is asked to stop leaves the queue alone. """
+    bench.submit("--no-wait", images=[bench.image("a.exe", b"a")])
+    bench.submit("--no-wait", images=[bench.image("b.exe", b"b")])
+    capsys.readouterr()
+    bridge = cligitbridge.Bridge(_arguments(bench))
+    bridge.stop = True
+
+    # pylint: disable=protected-access
+    assert cligitbridge._discard(bridge) == EXIT_INTERRUPTED
+    assert "discarded 0 of 2 queued requests" in capsys.readouterr().err
+    assert not [ref for ref in bench.refs() if "responses" in ref]
+
+
+def test_discard_wins_over_once(bench, capsys):
+    """ A discard next to --once discards and runs no step. """
+    bench.submit("--no-wait", images=[bench.image("a.exe", b"a")])
+    request_id = capsys.readouterr().out.strip()
+
+    assert bench.bridge("--discard") == EXIT_OK
+    assert not _Stub.requests
+    assert _discarded(bench, request_id)["status"] == gitproto.STATUS_REJECTED

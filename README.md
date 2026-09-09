@@ -141,6 +141,10 @@ them through gRPC.  Run it next to the test server, for example:
 spectestgitbridge --remote=git@host:bench.git --work-dir=/var/lib/spectest/bridge.git
 ```
 
+Use `--discard` to answer every queued request with a rejected response and
+exit.  The bridge runs no step and contacts no test server in this mode.  It
+returns 3 if a request survives the discard, and 130 if a signal stops it.
+
 ### Command - spectestaction
 
 The `spectestaction` command runs actions on a test server, for example:
@@ -298,6 +302,12 @@ A stop of the bridge during a wait leaves the request pending without counting
 an attempt, so the next run of the bridge repeats the whole request.  A long
 wait therefore widens the window in which a restart repeats the steps which
 already ran.
+
+An operator discards the queue with `spectestgitbridge --discard`.  The bridge
+answers every queued request with a rejected response whose reason is `the
+operator discarded all queued requests`.  A discard does not stop a request
+which already runs on the hardware.  The bridge discards the results of that
+request.
 
 The bridge creates a response reference with a lease so that it fails instead
 of overwriting a response which another bridge pushed first.  Git enforces fast
