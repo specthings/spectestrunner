@@ -234,7 +234,9 @@ refs/spectest/requests/<submitter>/<request-id>
 refs/spectest/responses/<request-id>
 ```
 
-The `<request-id>` is the object identifier of the request commit itself.  Only
+The `<request-id>` is the object identifier of the request commit itself.
+Each request carries a random `nonce`. Two submissions of the same request in
+the same second therefore get different identifiers.  Only
 submitters write request references and only the bridge writes response
 references, so the two sides never contend for the same reference.
 
@@ -258,6 +260,7 @@ spectest: request 3 steps for aarch64/zynqmp_apu
 version: 1
 kind: run-steps
 submitter: sebhub-at-workstation
+nonce: 9b1f4c0e2a7d...
 target: aarch64/zynqmp_apu
 timeout: 180.0
 steps:
@@ -299,6 +302,7 @@ spectest: request the description of aarch64/zynqmp_apu
 version: 1
 kind: describe-target
 submitter: sebhub-at-workstation
+nonce: 5e83d2a9c41b...
 target: aarch64/zynqmp_apu
 --- end ---
 ```
@@ -321,6 +325,9 @@ without a response in time is withdrawn and raises `WaitTimeout`. A rejected
 request raises `Rejected`.
 
 ### Failures
+
+The bridge checks the request reference again before it runs a request of a
+poll. It skips a request which the submitter withdrew in the meantime.
 
 The bridge answers a request which it can never run, for example one with a
 malformed YAML document, an unknown kind, or a digest mismatch, with a rejected

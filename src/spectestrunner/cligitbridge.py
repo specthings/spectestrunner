@@ -346,6 +346,15 @@ class Bridge:
         except gitwire.GitError as err:
             logging.warning("could not delete %s: %s", ref, err)
 
+    def _is_withdrawn(self, request_id: str) -> bool:
+        """
+        Return whether the remote has no request reference of the request.
+        A submitter withdraws a request while the bridge runs an earlier one
+        of the same poll.
+        """
+        return not self.repo.remote_refs(
+            self.args.remote, gitproto.request_ref_pattern(request_id))
+
     def tick(self) -> None:
         """ Poll the remote once and process everything which is pending. """
         requests, responses = self._refs()
@@ -358,6 +367,9 @@ class Bridge:
             if self.stop:
                 logging.debug("stop before %s", request_id)
                 return
+            if self._is_withdrawn(request_id):
+                logging.info("skip withdrawn %s", request_id)
+                continue
             self._process(request_id)
         self._reap(requests, responses)
 

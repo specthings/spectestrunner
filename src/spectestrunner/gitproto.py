@@ -26,6 +26,7 @@
 
 import getpass
 import re
+import secrets
 import socket
 from typing import Any, Optional
 
@@ -71,6 +72,9 @@ _REQUEST_BEGIN = "--- spectest-request ---"
 _RESPONSE_BEGIN = "--- spectest-response ---"
 
 _BLOCK_END = "--- end ---"
+
+#: The number of random bytes of the nonce of a request.
+_NONCE_BYTES = 16
 
 _INVALID_REF_CHARACTERS = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -178,9 +182,9 @@ def decode_message(message: str, marker: str) -> dict[str, Any]:
 def encode_request(submitter: str, target: str, timeout: float,
                    request_steps: list[dict[str, Any]]) -> str:
     """
-    Return the commit message of a run steps request.  The submitter is part
-    of the payload so that two submitters cannot derive the same request
-    identifier from an otherwise identical request.
+    Return the commit message of a run steps request.  The submitter and a
+    random nonce are part of the payload, so two submissions of an otherwise
+    identical request get different request identifiers.
     """
     count = len(request_steps)
     plural = "" if count == 1 else "s"
@@ -190,6 +194,7 @@ def encode_request(submitter: str, target: str, timeout: float,
             "version": VERSION,
             "kind": KIND_RUN_STEPS,
             "submitter": submitter,
+            "nonce": secrets.token_hex(_NONCE_BYTES),
             "target": target,
             "timeout": timeout,
             "steps": request_steps,
@@ -197,12 +202,16 @@ def encode_request(submitter: str, target: str, timeout: float,
 
 
 def encode_describe_target_request(submitter: str, target: str) -> str:
-    """ Return the commit message of a describe target request. """
+    """
+    Return the commit message of a describe target request.  The nonce has
+    the purpose of the one of a run steps request.
+    """
     return encode_message(
         f"spectest: request the description of {target}", _REQUEST_BEGIN, {
             "version": VERSION,
             "kind": KIND_DESCRIBE_TARGET,
             "submitter": submitter,
+            "nonce": secrets.token_hex(_NONCE_BYTES),
             "target": target,
         })
 

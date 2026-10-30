@@ -1252,3 +1252,32 @@ def test_description_must_be_a_string(bench, monkeypatch):
         with pytest.raises(gitproto.ProtocolError, match="description"):
             gitclient.Client(repo, bench.remote, "tester", 10.0,
                              0.0).describe_target("t")
+
+
+def test_identical_requests_get_different_identifiers(bench):
+    """ The nonce separates two identical submissions of one second. """
+    client = gitclient.Client(bench.hand(), bench.remote, "tester")
+    first = client.submit_describe_target("t")
+    second = client.submit_describe_target("t")
+    assert first != second
+    assert len(bench.refs()) == 2
+
+
+def test_withdrawn_request_is_skipped(bench, capsys, monkeypatch):
+    """ A request withdrawn while an earlier one runs does not run. """
+    bench.submit("--no-wait", images=[bench.image("a.exe", b"a")])
+    bench.submit("--no-wait", images=[bench.image("b.exe", b"b")])
+    first, second = capsys.readouterr().out.split()
+    client = gitclient.Client(bench.hand(), bench.remote, "tester")
+    run_image = _Stub.request_run_image
+
+    def _withdraw_the_other(self, request, timeout=None):
+        if not _Stub.requests:
+            other = second if request.path.endswith("a.exe") else first
+            client.cleanup(other)
+        return run_image(self, request, timeout)
+
+    monkeypatch.setattr(_Stub, "request_run_image", _withdraw_the_other)
+    bench.bridge()
+    assert len(_Stub.requests) == 1
+    assert len(bench.refs()) == 2
