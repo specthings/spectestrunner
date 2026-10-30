@@ -219,8 +219,9 @@ number of `SIGINT`.
 
 ## Git mediated transport
 
-The `spectestgitrun` and `spectestgitbridge` commands use a Git remote as the
-only channel between a submitter and a test server.  The submitter never talks
+The `spectestgitrun` and `spectestgitbridge` commands and the module
+`spectestrunner.gitclient` use a Git remote as the only channel between a
+submitter and a test server.  The submitter never talks
 to the test server and the test server never talks to the submitter.
 
 ### References
@@ -285,6 +286,39 @@ The commit message carries the response as a YAML document delimited by
 `--- spectest-response ---` and `--- end ---`.  The raw output bytes of each
 run are files below `output/` in the commit.  The `status` is either
 `completed` or `rejected`, and a rejected response states the `reason`.
+
+### Describe target request
+
+A request of the kind `describe-target` asks for the description of a target.
+Its commit has an empty tree:
+
+```
+spectest: request the description of aarch64/zynqmp_apu
+
+--- spectest-request ---
+version: 1
+kind: describe-target
+submitter: sebhub-at-workstation
+target: aarch64/zynqmp_apu
+--- end ---
+```
+
+The bridge asks the test server for the description through gRPC. A completed
+response carries it as the `description` string and has an empty `results`
+list.
+
+The bridge answers the pending describe target requests of a poll before the
+pending run requests. A description therefore waits at most for the request
+which runs at the time of the poll.
+
+### Client module
+
+The module `spectestrunner.gitclient` gives other programs the submitter side of
+the transport. A `Client` holds the local repository, the remote, the submitter,
+the wait timeout and the poll interval. `run_steps()` and `describe_target()`
+submit a request, wait for the response and delete both references. A request
+without a response in time is withdrawn and raises `WaitTimeout`. A rejected
+request raises `Rejected`.
 
 ### Failures
 

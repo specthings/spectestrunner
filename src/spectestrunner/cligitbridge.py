@@ -39,7 +39,8 @@ from spectestrunner import gitproto, gitwire, image, steps
 from spectestrunner.exitcodes import EXIT_INTERRUPTED, EXIT_OK, EXIT_TRANSPORT
 
 # pylint: disable=no-name-in-module
-from spectestrunner import GRPCServiceStub  # type: ignore
+from spectestrunner import (GRPCDescribeTargetRequest,
+                            GRPCServiceStub)  # type: ignore
 
 #: The reason of the response of a discarded request.
 _DISCARD_REASON = "the operator discarded all queued requests"
@@ -153,6 +154,18 @@ class Bridge:
                 steps.run_steps(GRPCServiceStub(channel), context,
                                 request_steps, lambda: self.stop))
 
+    def _describe_target(self, payload: dict[str, Any]) -> str:
+        """ Return the description of the target of the request. """
+        gitproto.check_describe_target_request(payload)
+        with grpc.insecure_channel(self.args.server_address) as channel:
+            try:
+                response = GRPCServiceStub(channel).request_describe_target(
+                    GRPCDescribeTargetRequest(target_id=payload["target"]),
+                    timeout=steps.CALL_TIMEOUT_MARGIN)
+            except grpc.RpcError as err:
+                raise steps.classify(err) from err
+        return response.description
+
     def _load_images(self, commit: str,
                      request_steps: list[dict[str, Any]]) -> dict[int, bytes]:
         """
@@ -184,7 +197,7 @@ class Bridge:
 
     def _push_response(self, request_id: str, status: str,
                        results: list[dict[str, Any]],
-                       reason: Optional[str]) -> None:
+                       details: dict[str, Any]) -> None:
         """
         Build and push the response commit of the request.
 
@@ -206,7 +219,10 @@ class Bridge:
                                        gitwire.MODE_FILE,
                                        self.repo.hash_object(output))
             payload.append(record)
-        message = gitproto.encode_response(request_id, status, payload, reason)
+        message = gitproto.encode_response(request_id,
+                                           status,
+                                           payload,
+                                           details=details)
         logging.debug("response message:\n%s", message)
         commit = self.repo.commit_tree(self.repo.make_tree(entries), message)
         self.repo.create_remote_ref(self.args.remote,
@@ -221,11 +237,17 @@ class Bridge:
         except gitwire.GitError:
             return False
 
-    def _publish(self, request_id: str, status: str,
-                 results: list[dict[str, Any]], reason: Optional[str]) -> bool:
-        """ Push the response and return whether the request is answered. """
+    def _publish(self, request_id: str, status: str, results: list[dict[str,
+                                                                        Any]],
+                 reason: Optional[str], **details: Any) -> bool:
+        """
+        Push the response and return whether the request is answered.  The
+        details are additional keys of the response payload.
+        """
+        if reason is not None:
+            details["reason"] = reason
         try:
-            self._push_response(request_id, status, results, reason)
+            self._push_response(request_id, status, results, details)
         except gitwire.GitError as err:
             if not self._is_answered(request_id):
                 logging.error("could not answer %s: %s", request_id, err)
@@ -258,20 +280,38 @@ class Bridge:
             logging.debug("request %s is '%s' from '%s' for target '%s'",
                           request_id, kind, payload.get("submitter"),
                           payload.get("target"))
-            if kind != gitproto.KIND_RUN_STEPS:
+            details: dict[str, Any] = {"kind": kind}
+            results: list[dict[str, Any]] = []
+            if kind == gitproto.KIND_RUN_STEPS:
+                results = self._run_steps(request_id, payload)
+            elif kind == gitproto.KIND_DESCRIBE_TARGET:
+                details["description"] = self._describe_target(payload)
+            else:
                 raise gitproto.ProtocolError(f"unsupported kind '{kind}'")
-            results = self._run_steps(request_id, payload)
         except steps.Stopped as err:
             logging.info("%s, so %s stays pending", err, request_id)
-        except gitproto.ProtocolError as err:
+        except (gitproto.ProtocolError, steps.StepError) as err:
             logging.error("reject %s: %s", request_id, err)
             self._publish(request_id, gitproto.STATUS_REJECTED, [], str(err))
         except (steps.TransientError, gitwire.GitError) as err:
             self._count_attempt(request_id, err)
         else:
             if not self._publish(request_id, gitproto.STATUS_COMPLETED,
-                                 results, None):
+                                 results, None, **details):
                 self._count_attempt(request_id, "the response was not pushed")
+
+    def _is_describe_target(self, request_id: str) -> bool:
+        """
+        Return whether the request asks for a target description.  A request
+        which cannot be read counts as a run, so that its processing rejects
+        it in the order of its age.
+        """
+        try:
+            payload = gitproto.decode_request(
+                self.repo.commit_message(request_id))
+        except (gitproto.ProtocolError, gitwire.GitError):
+            return False
+        return payload["kind"] == gitproto.KIND_DESCRIBE_TARGET
 
     def _age(self, commit: str) -> float:
         """ Return the age of the commit in seconds, or zero if unreadable. """
@@ -310,8 +350,8 @@ class Bridge:
         """ Poll the remote once and process everything which is pending. """
         requests, responses = self._refs()
         pending = _pending(requests, responses)
-        pending.sort(
-            key=lambda request_id: (-self._age(request_id), request_id))
+        pending.sort(key=lambda request_id: (not self._is_describe_target(
+            request_id), -self._age(request_id), request_id))
         logging.debug("tick: %d requests, %d answered, pending %s",
                       len(requests), len(responses), pending)
         for request_id in pending:
