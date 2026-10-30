@@ -312,8 +312,9 @@ response carries it as the `description` string and has an empty `results`
 list.
 
 The bridge answers the pending describe target requests of a poll before the
-pending run requests. A description therefore waits at most for the request
-which runs at the time of the poll.
+pending run requests of that poll. A describe target request which arrives
+during a poll waits for all requests of that poll. The next poll answers it
+first.
 
 ### Client module
 
