@@ -224,7 +224,7 @@ def report_result(result: dict[str, Any]) -> None:
         print(output.decode("latin-1"))
 
 
-def _classify(err: grpc.RpcError) -> Exception:
+def classify(err: grpc.RpcError) -> Exception:
     """
     Return the error which corresponds to the gRPC status code.
 
@@ -253,7 +253,7 @@ def _run_image(stub: Any, context: Context, step: dict[str, Any],
                                 execution_timeout_in_seconds=timeout),
             timeout=timeout + CALL_TIMEOUT_MARGIN)
     except grpc.RpcError as err:
-        raise _classify(err) from err
+        raise classify(err) from err
     return {
         "kind":
         STEP_IMAGE,
@@ -286,7 +286,7 @@ def _run_action(stub: Any, context: Context,
             GRPCActionRequest(uid=step["uid"], action=step["action"]),
             timeout=context.timeout + CALL_TIMEOUT_MARGIN)
     except grpc.RpcError as err:
-        raise _classify(err) from err
+        raise classify(err) from err
     return {
         "kind": STEP_ACTION,
         "uid": step["uid"],

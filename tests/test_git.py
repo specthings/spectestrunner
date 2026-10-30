@@ -34,8 +34,8 @@ import time
 import grpc
 import pytest
 
-from spectestrunner import (cligitbridge, cligitrun, gitproto, gitwire, image,
-                            steps)
+from spectestrunner import (cligitbridge, cligitrun, gitclient, gitproto,
+                            gitwire, image, steps)
 from spectestrunner.exitcodes import EXIT_INTERRUPTED, EXIT_OK, EXIT_TRANSPORT
 
 _NM = """#!/bin/sh
@@ -67,6 +67,13 @@ class _Response:  # pylint: disable=too-few-public-methods
         self.status = status
         self.load_duration_in_seconds = 1.5
         self.execution_duration_in_seconds = 2.5
+
+
+class _Description:  # pylint: disable=too-few-public-methods
+    """ Mimics a GRPCDescribeTargetResponse. """
+
+    def __init__(self, description):
+        self.description = description
 
 
 class _Channel:  # pylint: disable=too-few-public-methods
@@ -127,6 +134,13 @@ class _Stub:
             raise _Stub.image_error
         return _Response(request.path, b"output of " + request.data,
                          _Stub.image_status)
+
+    def request_describe_target(self, request, timeout=None):
+        assert timeout is not None, "a description needs a deadline"
+        _Stub.requests.append(request)
+        if _Stub.error is not None:
+            raise _Stub.error
+        return _Description(f"description of {request.target_id}")
 
     def request_action(self, request, timeout=None):
         assert timeout is not None, "an action needs a deadline"
@@ -1110,3 +1124,131 @@ def test_discard_wins_over_once(bench, capsys):
     assert bench.bridge("--discard") == EXIT_OK
     assert not _Stub.requests
     assert _discarded(bench, request_id)["status"] == gitproto.STATUS_REJECTED
+
+
+def _client(bench, monkeypatch):
+    """
+    Return a client whose response waits run one bridge tick.
+    """
+    monkeypatch.setattr(gitclient.time, "sleep",
+                        lambda _seconds: bench.bridge())
+    repo = gitwire.Repository(str(bench.tmp_path / "client.git"))
+    repo.init()
+    return gitclient.Client(repo, bench.remote, "tester", 10.0, 0.0)
+
+
+def test_client_describes_the_target(bench, monkeypatch):
+    """ A describe target request returns the description of the server. """
+    client = _client(bench, monkeypatch)
+    assert client.describe_target(
+        "aarch64/zynqmp_apu") == "description of aarch64/zynqmp_apu"
+    assert _Stub.requests[0].target_id == "aarch64/zynqmp_apu"
+    assert not bench.refs()
+
+
+def test_client_runs_the_steps(bench, monkeypatch):
+    """ The run steps of the client return the results with the outputs. """
+    client = _client(bench, monkeypatch)
+    results = client.run_steps("aarch64/zynqmp_apu", 5.0,
+                               [{
+                                   "kind": steps.STEP_IMAGE,
+                                   "path": "a/t.exe",
+                                   "digest": image.get_digest(b"abc"),
+                                   "breakpoints": [0x1000],
+                               }], {0: b"abc"})
+    assert len(results) == 1
+    assert results[0]["status"] == "success"
+    assert results[0]["output"] == b"output of abc"
+    assert _Stub.requests[0].execution_timeout_in_seconds == 5.0
+    assert not bench.refs()
+
+
+def test_client_withdraws_a_request_without_response(bench, monkeypatch):
+    """ A wait timeout deletes the request reference of the remote. """
+    monkeypatch.setattr(gitclient.time, "sleep", lambda _seconds: None)
+    with gitclient.repository() as repo:
+        with pytest.raises(gitclient.WaitTimeout, match="no response"):
+            gitclient.Client(repo, bench.remote, "tester", 0.0,
+                             0.0).describe_target("t")
+    assert not bench.refs()
+    assert not _Stub.requests
+
+
+def test_client_raises_a_rejection(bench, monkeypatch):
+    """ A permanent describe failure rejects the request. """
+    client = _client(bench, monkeypatch)
+    _Stub.error = _RpcError(grpc.StatusCode.NOT_FOUND)
+    with pytest.raises(gitclient.Rejected, match="NOT_FOUND"):
+        client.describe_target("t")
+    assert not bench.refs()
+
+
+def test_transient_describe_failure_is_retried(bench, capsys):
+    """ A transient describe failure counts an attempt. """
+    hand = bench.hand()
+    request_id = gitclient.Client(hand, bench.remote,
+                                  "tester").submit_describe_target("t")
+    _Stub.error = _RpcError(grpc.StatusCode.UNAVAILABLE)
+    bridge = cligitbridge.Bridge(
+        _arguments(bench, max_attempts=2, response_retention=1e9))
+    bridge.tick()
+    assert gitproto.response_ref(request_id) not in bench.refs()
+    _Stub.error = None
+    bridge.tick()
+    assert gitproto.response_ref(request_id) in bench.refs()
+
+
+def test_describe_target_goes_first(bench, capsys):
+    """ A describe target request overtakes an older run request. """
+    exe = bench.image("ticker.exe", b"one")
+    bench.submit("--no-wait", images=[exe])
+    capsys.readouterr()
+    gitclient.Client(bench.hand(), bench.remote,
+                     "tester").submit_describe_target("t")
+    bench.bridge()
+    assert [type(request).__name__ for request in _Stub.requests
+            ] == ["GRPCDescribeTargetRequest", "GRPCRunImageRequest"]
+
+
+def test_describe_target_without_target_is_rejected(bench):
+    """ A describe target request needs a target string. """
+    hand = bench.hand()
+    message = gitproto.encode_message(
+        "spectest: bogus", "--- spectest-request ---", {
+            "version": gitproto.VERSION,
+            "kind": gitproto.KIND_DESCRIBE_TARGET,
+        })
+    commit = hand.commit_tree(hand.make_tree({}), message)
+    bench.push(commit, gitproto.request_ref("tester", commit))
+    bench.bridge()
+    assert _discarded(bench, commit)["status"] == gitproto.STATUS_REJECTED
+    assert not _Stub.requests
+
+
+def test_unreadable_request_is_sorted_as_a_run(bench):
+    """ A request without a payload block is rejected as before. """
+    hand = bench.hand()
+    commit = hand.commit_tree(hand.make_tree({}), "garbage\n")
+    bench.push(commit, gitproto.request_ref("tester", commit))
+    bench.bridge()
+    assert _discarded(bench, commit)["status"] == gitproto.STATUS_REJECTED
+
+
+def test_description_must_be_a_string(bench, monkeypatch):
+    """ A describe response without a description is malformed. """
+    hand = bench.hand()
+
+    def _answer(_seconds):
+        refs = bench.refs()
+        request_id = next(iter(refs)).rpartition("/")[2]
+        commit = hand.commit_tree(
+            hand.make_tree({}),
+            gitproto.encode_response(request_id, gitproto.STATUS_COMPLETED,
+                                     []))
+        bench.push(commit, gitproto.response_ref(request_id))
+
+    monkeypatch.setattr(gitclient.time, "sleep", _answer)
+    with gitclient.repository() as repo:
+        with pytest.raises(gitproto.ProtocolError, match="description"):
+            gitclient.Client(repo, bench.remote, "tester", 10.0,
+                             0.0).describe_target("t")

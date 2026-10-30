@@ -39,6 +39,9 @@ VERSION = 1
 #: The request kind which runs a step sequence on a target.
 KIND_RUN_STEPS = "run-steps"
 
+#: The request kind which asks for the description of a target.
+KIND_DESCRIBE_TARGET = "describe-target"
+
 #: The response status of a completed request.
 STATUS_COMPLETED = "completed"
 
@@ -193,6 +196,17 @@ def encode_request(submitter: str, target: str, timeout: float,
         })
 
 
+def encode_describe_target_request(submitter: str, target: str) -> str:
+    """ Return the commit message of a describe target request. """
+    return encode_message(
+        f"spectest: request the description of {target}", _REQUEST_BEGIN, {
+            "version": VERSION,
+            "kind": KIND_DESCRIBE_TARGET,
+            "submitter": submitter,
+            "target": target,
+        })
+
+
 def decode_request(message: str) -> dict[str, Any]:
     """ Return the request payload of the commit message. """
     payload = decode_message(message, _REQUEST_BEGIN)
@@ -226,6 +240,12 @@ def _check_wait_step(step: dict[str, Any]) -> None:
         raise ProtocolError(f"a wait step has {err}") from err
 
 
+def check_describe_target_request(payload: dict[str, Any]) -> None:
+    """ Raise a protocol error if the describe target request is malformed. """
+    if not isinstance(payload.get("target"), str):
+        raise ProtocolError("the request has no 'target' string")
+
+
 def check_run_steps_request(payload: dict[str, Any]) -> None:
     """ Raise a protocol error if the run steps request is malformed. """
     if not isinstance(payload.get("target"), str):
@@ -254,8 +274,12 @@ def check_run_steps_request(payload: dict[str, Any]) -> None:
 def encode_response(request_id: str,
                     status: str,
                     results: list[dict[str, Any]],
-                    reason: Optional[str] = None) -> str:
-    """ Return the commit message of a response. """
+                    reason: Optional[str] = None,
+                    details: Optional[dict[str, Any]] = None) -> str:
+    """
+    Return the commit message of a response.  The details are added to the
+    payload and may replace the kind.
+    """
     subject = f"spectest: {status} response for {request_id[:12]}"
     payload: dict[str, Any] = {
         "version": VERSION,
@@ -265,6 +289,8 @@ def encode_response(request_id: str,
     }
     if reason is not None:
         payload["reason"] = reason
+    if details is not None:
+        payload.update(details)
     payload["results"] = results
     return encode_message(subject, _RESPONSE_BEGIN, payload)
 
