@@ -330,6 +330,12 @@ submit a request, wait for the response and delete both references. A request
 without a response in time is withdrawn and raises `WaitTimeout`. A rejected
 request raises `Rejected`.
 
+`submit_run_steps()` pushes a request and returns its identifier.
+`collect_run_steps()` waits for the response of that identifier, deletes both
+references and returns the results. A submitter which keeps its next request
+on the remote while the bridge runs the current one leaves the bridge no idle
+time between the two.
+
 ### Failures
 
 The bridge checks the request reference again before it runs a request of a
