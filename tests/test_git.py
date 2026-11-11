@@ -373,11 +373,11 @@ def test_transient_failure_retries_then_rejects(bench, capsys):
 
     bridge = cligitbridge.Bridge(
         _arguments(bench, max_attempts=3, response_retention=1e9))
-    bridge.tick()
+    assert not bridge.tick()
     assert gitproto.response_ref(request_id) not in bench.refs()
-    bridge.tick()
+    assert not bridge.tick()
     assert gitproto.response_ref(request_id) not in bench.refs()
-    bridge.tick()
+    assert bridge.tick()
     assert gitproto.response_ref(request_id) in bench.refs()
     assert bench.submit("--collect", request_id) == cligitrun.EXIT_REJECTED
     assert len(_Stub.requests) == 3
@@ -828,6 +828,50 @@ def test_run_polls_until_signalled(bench, monkeypatch, capsys):
         str(bench.tmp_path / "bridge.git"), "--poll-interval", "0.05"
     ]) == 0
     assert len(ticks) == 2
+
+
+def test_tick_reports_answered_requests(bench, capsys):
+    """ A tick tells whether it answered a request. """
+    bridge = cligitbridge.Bridge(_arguments(bench))
+    assert not bridge.tick()
+    bench.submit("--no-wait", images=[bench.image("a.exe", b"a")])
+    capsys.readouterr()
+    assert bridge.tick()
+    assert not bridge.tick()
+
+
+def test_tick_reports_rejected_requests(bench):
+    """ A rejected request counts as answered. """
+    repo = bench.hand()
+    commit = repo.commit_tree(repo.make_tree({}), "not a request at all\n")
+    repo.push(bench.remote,
+              f"{commit}:{gitproto.request_ref('tester', commit)}")
+    assert cligitbridge.Bridge(_arguments(bench)).tick()
+    assert gitproto.response_ref(commit) in bench.refs()
+
+
+def test_run_polls_at_once_after_an_answer(bench, monkeypatch):
+    """ The loop skips the wait after a tick which answered a request. """
+    answers = [True, True, False, False]
+    events = []
+
+    def _tick(self):
+        answered = answers.pop(0)
+        events.append(f"tick {answered}")
+        self.stop = not answers
+        return answered
+
+    def _sleep(_seconds):
+        if not events[-1].startswith("wait"):
+            events.append("wait")
+
+    monkeypatch.setattr(cligitbridge.Bridge, "tick", _tick)
+    monkeypatch.setattr(cligitbridge.time, "sleep", _sleep)
+    cligitbridge.Bridge(_arguments(bench, once=False,
+                                   poll_interval=0.01)).run()
+    assert events == [
+        "tick True", "tick True", "tick False", "wait", "tick False"
+    ]
 
 
 def test_malformed_response_is_reported(bench, capsys):
