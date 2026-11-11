@@ -257,21 +257,27 @@ class Bridge:
         self.attempts.pop(request_id, None)
         return True
 
-    def _count_attempt(self, request_id: str, reason: object) -> None:
-        """ Record a failed attempt and reject the request past the limit. """
+    def _count_attempt(self, request_id: str, reason: object) -> bool:
+        """
+        Record a failed attempt and reject the request past the limit.
+        Return whether the request is answered.
+        """
         attempt = self.attempts.get(request_id, 0) + 1
         self.attempts[request_id] = attempt
         if attempt < self.args.max_attempts:
             logging.warning("attempt %d for %s failed: %s", attempt,
                             request_id, reason)
-            return
+            return False
         logging.error("reject %s after %d attempts: %s", request_id, attempt,
                       reason)
-        self._publish(request_id, gitproto.STATUS_REJECTED, [],
-                      f"{attempt} attempts failed, last: {reason}")
+        return self._publish(request_id, gitproto.STATUS_REJECTED, [],
+                             f"{attempt} attempts failed, last: {reason}")
 
-    def _process(self, request_id: str) -> None:
-        """ Run one request and push its response. """
+    def _process(self, request_id: str) -> bool:
+        """
+        Run one request and push its response.  Return whether the request
+        is answered.
+        """
         try:
             message = self.repo.commit_message(request_id)
             logging.debug("request %s message:\n%s", request_id, message)
@@ -290,15 +296,17 @@ class Bridge:
                 raise gitproto.ProtocolError(f"unsupported kind '{kind}'")
         except steps.Stopped as err:
             logging.info("%s, so %s stays pending", err, request_id)
+            return False
         except (gitproto.ProtocolError, steps.StepError) as err:
             logging.error("reject %s: %s", request_id, err)
-            self._publish(request_id, gitproto.STATUS_REJECTED, [], str(err))
+            return self._publish(request_id, gitproto.STATUS_REJECTED, [],
+                                 str(err))
         except (steps.TransientError, gitwire.GitError) as err:
-            self._count_attempt(request_id, err)
-        else:
-            if not self._publish(request_id, gitproto.STATUS_COMPLETED,
-                                 results, None, **details):
-                self._count_attempt(request_id, "the response was not pushed")
+            return self._count_attempt(request_id, err)
+        if self._publish(request_id, gitproto.STATUS_COMPLETED, results, None,
+                         **details):
+            return True
+        return self._count_attempt(request_id, "the response was not pushed")
 
     def _is_describe_target(self, request_id: str) -> bool:
         """
@@ -355,23 +363,33 @@ class Bridge:
         return not self.repo.remote_refs(
             self.args.remote, gitproto.request_ref_pattern(request_id))
 
-    def tick(self) -> None:
-        """ Poll the remote once and process everything which is pending. """
+    def tick(self) -> bool:
+        """
+        Poll the remote once and process everything which is pending.
+        Return whether a request is answered.
+
+        A submitter may push its next request while the bridge runs the
+        previous one.  The pending requests are read once at the start, so
+        such a request waits for the next tick.
+        """
         requests, responses = self._refs()
         pending = _pending(requests, responses)
         pending.sort(key=lambda request_id: (not self._is_describe_target(
             request_id), -self._age(request_id), request_id))
         logging.debug("tick: %d requests, %d answered, pending %s",
                       len(requests), len(responses), pending)
+        answered = False
         for request_id in pending:
             if self.stop:
                 logging.debug("stop before %s", request_id)
-                return
+                return answered
             if self._is_withdrawn(request_id):
                 logging.info("skip withdrawn %s", request_id)
                 continue
-            self._process(request_id)
+            if self._process(request_id):
+                answered = True
         self._reap(requests, responses)
+        return answered
 
     def discard(self) -> int:
         """
@@ -396,14 +414,21 @@ class Bridge:
         return len(pending) - discarded
 
     def run(self) -> None:
-        """ Poll the remote until the process is asked to stop. """
+        """
+        Poll the remote until the process is asked to stop.  A tick which
+        answers a request is followed by the next tick at once, since its
+        submitter may wait with the next request.
+        """
         while not self.stop:
             try:
-                self.tick()
+                answered = self.tick()
             except gitwire.GitError as err:
                 logging.error("%s", err)
+                answered = False
             if self.args.once:
                 return
+            if answered:
+                continue
             deadline = time.monotonic() + self.args.poll_interval
             while not self.stop and time.monotonic() < deadline:
                 time.sleep(min(1.0, deadline - time.monotonic()))

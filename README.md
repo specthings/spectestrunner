@@ -316,6 +316,11 @@ pending run requests of that poll. A describe target request which arrives
 during a poll waits for all requests of that poll. The next poll answers it
 first.
 
+A poll which answers a request is followed by the next poll at once. A
+submitter which waits for its response and then pushes its next request
+therefore waits for no `--poll-interval`. The bridge waits for the poll
+interval only after a poll which answered nothing.
+
 ### Client module
 
 The module `spectestrunner.gitclient` gives other programs the submitter side of
