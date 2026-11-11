@@ -197,9 +197,19 @@ class Client:
         timeout error in this case, and a rejected error if the bridge
         rejected the request.
         """
-        return self._complete(
-            self.submit_run_steps(target, timeout, request_steps,
-                                  data))["results"]
+        return self.collect_run_steps(
+            self.submit_run_steps(target, timeout, request_steps, data))
+
+    def collect_run_steps(self, request_id: str) -> list[dict[str, Any]]:
+        """
+        Wait for the response of the submitted run steps request and return
+        its results.
+
+        A submitter may keep several requests on the remote and collect them
+        one after the other.  The wait timeout starts with the call.  The
+        errors are the ones of run_steps().
+        """
+        return self._complete(request_id)["results"]
 
     def describe_target(self, target: str) -> str:
         """

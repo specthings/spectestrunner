@@ -1207,6 +1207,26 @@ def test_client_runs_the_steps(bench, monkeypatch):
     assert not bench.refs()
 
 
+def test_client_collects_submitted_requests(bench, monkeypatch):
+    """ A client keeps two requests on the remote and collects both. """
+    client = _client(bench, monkeypatch)
+    request_ids = [
+        client.submit_run_steps("aarch64/zynqmp_apu", 5.0,
+                                [{
+                                    "kind": steps.STEP_IMAGE,
+                                    "path": f"a/{name}.exe",
+                                    "digest": image.get_digest(name),
+                                    "breakpoints": [],
+                                }], {0: name}) for name in (b"a", b"b")
+    ]
+    assert [
+        client.collect_run_steps(request_id)[0]["output"]
+        for request_id in request_ids
+    ] == [b"output of a", b"output of b"]
+    assert len(_Stub.requests) == 2
+    assert not bench.refs()
+
+
 def test_client_withdraws_a_request_without_response(bench, monkeypatch):
     """ A wait timeout deletes the request reference of the remote. """
     monkeypatch.setattr(gitclient.time, "sleep", lambda _seconds: None)
