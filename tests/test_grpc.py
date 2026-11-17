@@ -100,6 +100,9 @@ class _Servicer(GRPCServiceServicer):
         #: The requests to run an image, in the order they arrived.
         self.run_requests = []
 
+        #: The requests of stored log records, in the order they arrived.
+        self.log_requests = []
+
     def request_action(self, request, context):
         return GRPCActionResponse(uid=request.uid,
                                   action=request.action,
@@ -147,6 +150,11 @@ class _Servicer(GRPCServiceServicer):
                 _sleep(0.01)
 
     def request_log(self, request, context):
+        if request.stored:
+            self.log_requests.append(request)
+            yield GRPCLogResponse(data=f"stored {request.request_id}")
+            yield GRPCLogResponse(omitted=3)
+            return
         if request.logger_name == SILENT_LOGGER:
             while context.is_active():
                 _sleep(0.01)
@@ -468,6 +476,36 @@ def test_log_stops_on_the_timeout(bench, capsys):
         SILENT_LOGGER
     ]) == EXIT_OK
     assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize("option", [
+    "--stored", "--since=1970-01-01T00:00:01+00:00",
+    "--until=1970-01-01T00:00:02+00:00", "--request-id=abc", "--max-records=2"
+])
+def test_log_of_the_stored_records(bench, capsys, option):
+    """ A selection option reads the stored records and reports omissions. """
+    assert clilog.clilog([
+        "spectestlog", "--server-address", bench.address, "--timeout", "20",
+        option, "some.logger"
+    ]) == EXIT_OK
+    captured = capsys.readouterr()
+    request = bench.servicer.log_requests[0]
+    assert captured.out == f"stored {request.request_id}\n"
+    assert "the record limit omitted 3 records" in captured.err
+    assert request.logger_name == "some.logger"
+    assert request.stored
+
+
+def test_log_passes_the_selection(bench, capsys):
+    """ The selection reaches the server as it is. """
+    assert clilog.clilog([
+        "spectestlog", "--server-address", bench.address, "--since",
+        "1970-01-01T00:00:01+00:00", "--until", "1970-01-01T00:00:02+00:00",
+        "--request-id", "abc", "--max-records", "2"
+    ]) == EXIT_OK
+    request = bench.servicer.log_requests[0]
+    assert (request.begin_time, request.end_time, request.request_id,
+            request.max_records) == (1.0, 2.0, "abc", 2)
 
 
 def test_action_which_fails(bench, capsys):

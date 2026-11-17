@@ -48,6 +48,7 @@ classifiers = [
 [project.scripts]
 spectestaction = "spectestrunner.cliaction:cliaction"
 spectestgitbridge = "spectestrunner.cligitbridge:cligitbridge"
+spectestgitlog = "spectestrunner.cligitlog:cligitlog"
 spectestgitrun = "spectestrunner.cligitrun:cligitrun"
 spectestdescribetarget = "spectestrunner.clidescribetarget:clidescribetarget"
 spectestio = "spectestrunner.cliio:cliio"

@@ -33,6 +33,7 @@ from typing import Any, Callable, Iterator, Optional
 
 import grpc
 
+from .logring import request_id_metadata
 from .exitcodes import (EXIT_ACTION, EXIT_INTERRUPTED, EXIT_OK, EXIT_STATUS,
                         EXIT_TRANSPORT)
 
@@ -101,10 +102,14 @@ class Context:
     The data holds the image of every image step by its index in the
     sequence.  Whoever builds the sequence fills it before the first step
     runs, so that a sequence which cannot be prepared activates nothing.
+
+    Each call carries the request identifier in its metadata, so that the
+    test server tags its log records with it.
     """
     target: str
     timeout: float
     data: dict[int, bytes]
+    request_id: str = ""
 
 
 def succeeded(status: str) -> bool:
@@ -251,7 +256,8 @@ def _run_image(stub: Any, context: Context, step: dict[str, Any],
                                 digest=step["digest"],
                                 data=context.data[index],
                                 execution_timeout_in_seconds=timeout),
-            timeout=timeout + CALL_TIMEOUT_MARGIN)
+            timeout=timeout + CALL_TIMEOUT_MARGIN,
+            metadata=request_id_metadata(context.request_id))
     except grpc.RpcError as err:
         raise classify(err) from err
     return {
@@ -284,7 +290,8 @@ def _run_action(stub: Any, context: Context,
     try:
         response = stub.request_action(
             GRPCActionRequest(uid=step["uid"], action=step["action"]),
-            timeout=context.timeout + CALL_TIMEOUT_MARGIN)
+            timeout=context.timeout + CALL_TIMEOUT_MARGIN,
+            metadata=request_id_metadata(context.request_id))
     except grpc.RpcError as err:
         raise classify(err) from err
     return {

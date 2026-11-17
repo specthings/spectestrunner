@@ -112,6 +112,14 @@ class Client:
             self.submitter, target)
         return self._push_request(self.repo.make_tree({}), message)
 
+    def submit_read_log(self, begin_time: float, end_time: float,
+                        request_id: str, max_records: int) -> str:
+        """ Push a read log request and return its identifier. """
+        message = gitproto.encode_read_log_request(self.submitter, begin_time,
+                                                   end_time, request_id,
+                                                   max_records)
+        return self._push_request(self.repo.make_tree({}), message)
+
     def wait_for_response(self, request_id: str) -> Optional[str]:
         """
         Return the response commit identifier, or None on timeout.  Raise a
@@ -144,15 +152,21 @@ class Client:
         """
         Return the payload of the response commit.
 
-        The output of a run lives in a blob of the response commit.  Each
-        result which names an output file which exists carries the output
-        bytes.
+        The output of a run and the records of a log live in blobs of the
+        response commit.  Each result and each log entry which names a file
+        which exists carries its bytes as the output.
         """
         message = self.repo.commit_message(commit)
         logging.debug("response message:\n%s", message)
         payload = gitproto.decode_response(message)
+        logs = payload.get("logs", [])
+        if not isinstance(logs, list) or not all(
+                isinstance(entry, dict) for entry in logs):
+            raise gitproto.ProtocolError(
+                "the response has a 'logs' value which is no list of "
+                "mappings")
         blobs = self.repo.tree_entries(commit)
-        for result in payload["results"]:
+        for result in payload["results"] + logs:
             object_id = blobs.get(result.get("file", ""))
             if object_id is not None:
                 result["output"] = self.repo.blob(object_id)
@@ -223,3 +237,24 @@ class Client:
             raise gitproto.ProtocolError(
                 "the response has no 'description' string")
         return description
+
+    def read_log(self,
+                 begin_time: float = 0.0,
+                 end_time: float = 0.0,
+                 request_id: str = "",
+                 max_records: int = 0) -> list[dict[str, Any]]:
+        """
+        Return the log entries of the bridge and of the test server through
+        the remote.
+
+        The selection follows LogRing.select().  Each entry names its source
+        and carries either the records as output or an error.  The errors
+        are the ones of run_steps().
+        """
+        payload = self._complete(
+            self.submit_read_log(begin_time, end_time, request_id,
+                                 max_records))
+        logs = payload.get("logs")
+        if not isinstance(logs, list):
+            raise gitproto.ProtocolError("the response has no 'logs' list")
+        return logs
