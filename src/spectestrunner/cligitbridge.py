@@ -35,12 +35,21 @@ from typing import Any, Optional
 import grpc
 from specitems import get_arguments
 
-from spectestrunner import gitproto, gitwire, image, steps
+from spectestrunner import gitproto, gitwire, image, logring, steps
 from spectestrunner.exitcodes import EXIT_INTERRUPTED, EXIT_OK, EXIT_TRANSPORT
 
 # pylint: disable=no-name-in-module
-from spectestrunner import (GRPCDescribeTargetRequest,
+from spectestrunner import (GRPCDescribeTargetRequest, GRPCLogRequest,
                             GRPCServiceStub)  # type: ignore
+
+#: The source name of the log records of the bridge.
+LOG_SOURCE_BRIDGE = "spectestgitbridge"
+
+#: The source name of the log records of the test server.
+LOG_SOURCE_SERVER = "spectestserver"
+
+#: The request kinds which run no step and which the bridge answers first.
+_SHORT_KINDS = (gitproto.KIND_DESCRIBE_TARGET, gitproto.KIND_READ_LOG)
 
 #: The reason of the response of a discarded request.
 _DISCARD_REASON = "the operator discarded all queued requests"
@@ -125,6 +134,8 @@ class Bridge:
         self.repo.init()
         self.attempts: dict[str, int] = {}
         self.stop = False
+        self.ring = logring.LogRing()
+        logging.getLogger().addHandler(self.ring)
 
     def _refs(self) -> tuple[dict[str, list[str]], dict[str, str]]:
         """ Return the request references and responses by identifier. """
@@ -145,7 +156,8 @@ class Bridge:
         request_steps = payload["steps"]
         context = steps.Context(target=payload["target"],
                                 timeout=float(payload["timeout"]),
-                                data=self._load_images(commit, request_steps))
+                                data=self._load_images(commit, request_steps),
+                                request_id=commit)
 
         # The channel belongs to the caller, since a sequence which is not
         # run to its end would otherwise leave it to the garbage collector.
@@ -154,17 +166,81 @@ class Bridge:
                 steps.run_steps(GRPCServiceStub(channel), context,
                                 request_steps, lambda: self.stop))
 
-    def _describe_target(self, payload: dict[str, Any]) -> str:
+    def _describe_target(self, request_id: str, payload: dict[str,
+                                                              Any]) -> str:
         """ Return the description of the target of the request. """
         gitproto.check_describe_target_request(payload)
         with grpc.insecure_channel(self.args.server_address) as channel:
             try:
                 response = GRPCServiceStub(channel).request_describe_target(
                     GRPCDescribeTargetRequest(target_id=payload["target"]),
-                    timeout=steps.CALL_TIMEOUT_MARGIN)
+                    timeout=steps.CALL_TIMEOUT_MARGIN,
+                    metadata=logring.request_id_metadata(request_id))
             except grpc.RpcError as err:
                 raise steps.classify(err) from err
         return response.description
+
+    def _server_log(self, payload: dict[str, Any]) -> logring.Selection:
+        """ Return the stored log records of the test server. """
+        lines = []
+        omitted = 0
+        with grpc.insecure_channel(self.args.server_address) as channel:
+            for response in GRPCServiceStub(channel).request_log(
+                    GRPCLogRequest(stored=True,
+                                   begin_time=payload["begin_time"],
+                                   end_time=payload["end_time"],
+                                   request_id=payload["request_id"],
+                                   max_records=payload["max_records"]),
+                    timeout=steps.CALL_TIMEOUT_MARGIN):
+                if response.omitted:
+                    omitted = response.omitted
+                else:
+                    lines.append(response.data)
+        return logring.Selection(lines, omitted)
+
+    def _read_log(
+        self,
+        payload: dict[str,
+                      Any]) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+        """
+        Return the log entries of the response and the files which hold the
+        records.
+
+        A test server which does not answer leaves an entry with an error,
+        since the records of the bridge may tell why.
+        """
+        gitproto.check_read_log_request(payload)
+        logs: list[dict[str, Any]] = []
+        files: dict[str, bytes] = {}
+
+        def _add(source: str, selection: logring.Selection) -> None:
+            file = gitproto.log_file(source)
+            files[file] = "".join(f"{line}\n"
+                                  for line in selection.lines).encode("utf-8")
+            logs.append({
+                "source": source,
+                "file": file,
+                "records": len(selection.lines),
+                "omitted": selection.omitted,
+            })
+
+        _add(
+            LOG_SOURCE_BRIDGE,
+            self.ring.select(begin=payload["begin_time"],
+                             end=payload["end_time"],
+                             request_id=payload["request_id"],
+                             max_records=payload["max_records"]))
+        try:
+            selection = self._server_log(payload)
+        except grpc.RpcError as err:
+            logging.error("could not read the log of the test server: %s", err)
+            logs.append({
+                "source": LOG_SOURCE_SERVER,
+                "error": str(steps.classify(err)),
+            })
+        else:
+            _add(LOG_SOURCE_SERVER, selection)
+        return logs, files
 
     def _load_images(self, commit: str,
                      request_steps: list[dict[str, Any]]) -> dict[int, bytes]:
@@ -195,36 +271,43 @@ class Bridge:
             data[index] = content
         return data
 
+    def _make_tree(self, files: dict[str, bytes]) -> str:
+        """ Return the tree of the files, each one level below the root. """
+        entries: dict[str, Any] = {}
+        for file, content in files.items():
+            directory, name = file.split("/")
+            entries.setdefault(directory,
+                               {})[name] = (gitwire.MODE_FILE,
+                                            self.repo.hash_object(content))
+        return self.repo.make_tree(entries)
+
     def _push_response(self, request_id: str, status: str,
-                       results: list[dict[str, Any]],
-                       details: dict[str, Any]) -> None:
+                       results: list[dict[str, Any]], details: dict[str, Any],
+                       files: dict[str, bytes]) -> None:
         """
         Build and push the response commit of the request.
 
         The output of a run goes into a blob of the commit, so the result
         gains the name of that file here.  A step result on its own carries
-        the bytes and knows nothing about a commit.
+        the bytes and knows nothing about a commit.  The files go into the
+        commit as they are.
         """
-        entries: dict[str, Any] = {}
+        files = dict(files)
         payload = []
         for index, result in enumerate(results):
             record = dict(result)
             output = record.pop("output", None)
             if output is not None:
-                file = gitproto.output_file(index,
-                                            os.path.basename(record["path"]))
-                record["file"] = file
-                entries.setdefault(gitproto.OUTPUT_DIRECTORY,
-                                   {})[os.path.basename(file)] = (
-                                       gitwire.MODE_FILE,
-                                       self.repo.hash_object(output))
+                record["file"] = gitproto.output_file(
+                    index, os.path.basename(record["path"]))
+                files[record["file"]] = output
             payload.append(record)
         message = gitproto.encode_response(request_id,
                                            status,
                                            payload,
                                            details=details)
         logging.debug("response message:\n%s", message)
-        commit = self.repo.commit_tree(self.repo.make_tree(entries), message)
+        commit = self.repo.commit_tree(self._make_tree(files), message)
         self.repo.create_remote_ref(self.args.remote,
                                     gitproto.response_ref(request_id), commit)
         logging.info("responded to %s with '%s'", request_id, status)
@@ -237,17 +320,23 @@ class Bridge:
         except gitwire.GitError:
             return False
 
-    def _publish(self, request_id: str, status: str, results: list[dict[str,
-                                                                        Any]],
-                 reason: Optional[str], **details: Any) -> bool:
+    def _publish(self,
+                 request_id: str,
+                 status: str,
+                 results: list[dict[str, Any]],
+                 reason: Optional[str],
+                 files: Optional[dict[str, bytes]] = None,
+                 **details: Any) -> bool:
         """
         Push the response and return whether the request is answered.  The
-        details are additional keys of the response payload.
+        files go into the commit.  The details are additional keys of the
+        response payload.
         """
         if reason is not None:
             details["reason"] = reason
         try:
-            self._push_response(request_id, status, results, details)
+            self._push_response(request_id, status, results, details, files
+                                or {})
         except gitwire.GitError as err:
             if not self._is_answered(request_id):
                 logging.error("could not answer %s: %s", request_id, err)
@@ -288,10 +377,14 @@ class Bridge:
                           payload.get("target"))
             details: dict[str, Any] = {"kind": kind}
             results: list[dict[str, Any]] = []
+            files: dict[str, bytes] = {}
             if kind == gitproto.KIND_RUN_STEPS:
                 results = self._run_steps(request_id, payload)
             elif kind == gitproto.KIND_DESCRIBE_TARGET:
-                details["description"] = self._describe_target(payload)
+                details["description"] = self._describe_target(
+                    request_id, payload)
+            elif kind == gitproto.KIND_READ_LOG:
+                details["logs"], files = self._read_log(payload)
             else:
                 raise gitproto.ProtocolError(f"unsupported kind '{kind}'")
         except steps.Stopped as err:
@@ -304,22 +397,22 @@ class Bridge:
         except (steps.TransientError, gitwire.GitError) as err:
             return self._count_attempt(request_id, err)
         if self._publish(request_id, gitproto.STATUS_COMPLETED, results, None,
-                         **details):
+                         files, **details):
             return True
         return self._count_attempt(request_id, "the response was not pushed")
 
-    def _is_describe_target(self, request_id: str) -> bool:
+    def _is_short(self, request_id: str) -> bool:
         """
-        Return whether the request asks for a target description.  A request
-        which cannot be read counts as a run, so that its processing rejects
-        it in the order of its age.
+        Return whether the request runs no step.  A request which cannot be
+        read counts as a run, so that its processing rejects it in the order
+        of its age.
         """
         try:
             payload = gitproto.decode_request(
                 self.repo.commit_message(request_id))
         except (gitproto.ProtocolError, gitwire.GitError):
             return False
-        return payload["kind"] == gitproto.KIND_DESCRIBE_TARGET
+        return payload["kind"] in _SHORT_KINDS
 
     def _age(self, commit: str) -> float:
         """ Return the age of the commit in seconds, or zero if unreadable. """
@@ -374,7 +467,7 @@ class Bridge:
         """
         requests, responses = self._refs()
         pending = _pending(requests, responses)
-        pending.sort(key=lambda request_id: (not self._is_describe_target(
+        pending.sort(key=lambda request_id: (not self._is_short(
             request_id), -self._age(request_id), request_id))
         logging.debug("tick: %d requests, %d answered, pending %s",
                       len(requests), len(responses), pending)
@@ -386,8 +479,9 @@ class Bridge:
             if self._is_withdrawn(request_id):
                 logging.info("skip withdrawn %s", request_id)
                 continue
-            if self._process(request_id):
-                answered = True
+            with self.ring.track(request_id):
+                if self._process(request_id):
+                    answered = True
         self._reap(requests, responses)
         return answered
 

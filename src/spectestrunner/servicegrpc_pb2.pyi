@@ -52,16 +52,28 @@ class GRPCInputResponse(_message.Message):
     def __init__(self, uid: _Optional[str] = ..., data: _Optional[bytes] = ...) -> None: ...
 
 class GRPCLogRequest(_message.Message):
-    __slots__ = ("logger_name",)
+    __slots__ = ("logger_name", "stored", "begin_time", "end_time", "request_id", "max_records")
     LOGGER_NAME_FIELD_NUMBER: _ClassVar[int]
+    STORED_FIELD_NUMBER: _ClassVar[int]
+    BEGIN_TIME_FIELD_NUMBER: _ClassVar[int]
+    END_TIME_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
+    MAX_RECORDS_FIELD_NUMBER: _ClassVar[int]
     logger_name: str
-    def __init__(self, logger_name: _Optional[str] = ...) -> None: ...
+    stored: bool
+    begin_time: float
+    end_time: float
+    request_id: str
+    max_records: int
+    def __init__(self, logger_name: _Optional[str] = ..., stored: bool = ..., begin_time: _Optional[float] = ..., end_time: _Optional[float] = ..., request_id: _Optional[str] = ..., max_records: _Optional[int] = ...) -> None: ...
 
 class GRPCLogResponse(_message.Message):
-    __slots__ = ("data",)
+    __slots__ = ("data", "omitted")
     DATA_FIELD_NUMBER: _ClassVar[int]
+    OMITTED_FIELD_NUMBER: _ClassVar[int]
     data: str
-    def __init__(self, data: _Optional[str] = ...) -> None: ...
+    omitted: int
+    def __init__(self, data: _Optional[str] = ..., omitted: _Optional[int] = ...) -> None: ...
 
 class GRPCRunImageRequest(_message.Message):
     __slots__ = ("target_id", "breakpoints", "path", "digest", "data", "execution_timeout_in_seconds")

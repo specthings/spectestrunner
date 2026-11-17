@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: BSD-2-Clause
 
-// Copyright (C) 2024, 2025 embedded brains GmbH & Co. KG
+// Copyright (C) 2024, 2026 embedded brains GmbH & Co. KG
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions
@@ -56,10 +56,16 @@ message GRPCInputResponse {
 
 message GRPCLogRequest {
   string logger_name = 1;
+  bool stored = 2;
+  double begin_time = 3;
+  double end_time = 4;
+  string request_id = 5;
+  uint32 max_records = 6;
 }
 
 message GRPCLogResponse {
   string data = 1;
+  uint64 omitted = 2;
 }
 
 message GRPCRunImageRequest {

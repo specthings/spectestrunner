@@ -132,6 +132,21 @@ report the response of a request which was submitted before.
 Note that `--wait` used to be an unambiguous abbreviation of `--wait-timeout`
 and now appends a step instead.  Spell `--wait-timeout` out.
 
+### Command - spectestgitlog
+
+The `spectestgitlog` command prints the stored log records of the bridge and of
+the test server through a Git remote, for example:
+
+```
+spectestgitlog --remote=git@host:bench.git --request-id=5af37a3a4749
+```
+
+It takes the options `--remote`, `--submitter`, `--work-dir`, `--wait-timeout`
+and `--poll-interval` of `spectestgitrun`, and the selection options of
+`spectestlog`.  The records of each source follow a line `--- <source> ---`.
+The command exits with 3 if the bridge could not read the records of the test
+server.
+
 ### Command - spectestgitbridge
 
 The `spectestgitbridge` command polls a Git remote for requests and answers
@@ -187,6 +202,28 @@ displayed.
 The command streams until it is interrupted.  Use `--max-lines` to stop after a
 number of messages and `--timeout` to stop after a number of seconds, so that
 the command can be used in a script.
+
+The test server stores its recent log records in a ring of fixed size.  The
+ring drops the oldest records first, and a restart of the server empties it.  Use `--stored` to print the stored
+records and exit.  These options select the stored records and imply
+`--stored`:
+
+| Option | Selection |
+| ------ | --------- |
+| `--since` | the records from this ISO 8601 time on |
+| `--until` | the records up to this ISO 8601 time |
+| `--request-id` | the records of the request whose identifier starts with this |
+| `--max-records` | the oldest records of the selection up to this count |
+
+A time without a zone is a local time.  The command warns about the records
+which `--max-records` omitted.
+
+A client which sends the metadata `spectest-request-id` with a call makes the
+test server tag each record with that request identifier while the call runs.
+The steps of `spectestgitbridge` send the identifier of the Git request.  A
+record carries every request identifier of the calls in progress at its time.
+A call of another client in parallel therefore adds its records to the
+selection of a request.
 
 ### Command - spectestio
 
@@ -321,12 +358,58 @@ submitter which waits for its response and then pushes its next request
 therefore waits for no `--poll-interval`. The bridge waits for the poll
 interval only after a poll which answered nothing.
 
+### Read log request
+
+A request of the kind `read-log` asks for the stored log records of the bridge
+and of the test server.  Its commit has an empty tree.  The selection follows
+the options of `spectestlog`.  A value of zero leaves a bound open, and an
+empty `request_id` selects every request:
+
+```
+spectest: request the log records
+
+--- spectest-request ---
+version: 1
+kind: read-log
+submitter: sebhub-at-workstation
+nonce: 0c41e7d29a5f...
+begin_time: 0.0
+end_time: 0.0
+request_id: 5af37a3a4749
+max_records: 0
+--- end ---
+```
+
+The bridge stores its own log records in a ring of fixed size.  It tags each
+record with the identifier of the request which it processes at that time.
+A restart of the bridge or of the test server empties its ring.  A test server
+which does not answer does not cause another attempt of the request.  A
+completed response has an empty `results` list and a `logs` list with one entry
+for each source.  The records of a source are a file below `log/` in the
+commit:
+
+```
+logs:
+- source: spectestgitbridge
+  file: log/spectestgitbridge.log
+  records: 12
+  omitted: 0
+- source: spectestserver
+  file: log/spectestserver.log
+  records: 85
+  omitted: 0
+```
+
+An entry with an `error` instead of a `file` states that the bridge could not
+read the records of that source.  A read log request goes first like a describe
+target request.
+
 ### Client module
 
 The module `spectestrunner.gitclient` gives other programs the submitter side of
 the transport. A `Client` holds the local repository, the remote, the submitter,
-the wait timeout and the poll interval. `run_steps()` and `describe_target()`
-submit a request, wait for the response and delete both references. A request
+the wait timeout and the poll interval. `run_steps()`, `describe_target()` and
+`read_log()` submit a request, wait for the response and delete both references. A request
 without a response in time is withdrawn and raises `WaitTimeout`. A rejected
 request raises `Rejected`.
 

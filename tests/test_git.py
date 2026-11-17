@@ -25,6 +25,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 import argparse
+import logging
 import os
 import signal
 import stat
@@ -34,9 +35,14 @@ import time
 import grpc
 import pytest
 
-from spectestrunner import (cligitbridge, cligitrun, gitclient, gitproto,
-                            gitwire, image, steps)
-from spectestrunner.exitcodes import EXIT_INTERRUPTED, EXIT_OK, EXIT_TRANSPORT
+from spectestrunner import (cligitbridge, cligitlog, cligitrun, gitclient,
+                            gitproto, gitwire, image, logring, steps)
+from spectestrunner.exitcodes import (EXIT_INTERRUPTED, EXIT_MISSING, EXIT_OK,
+                                      EXIT_REJECTED, EXIT_TIMEOUT,
+                                      EXIT_TRANSPORT)
+
+# pylint: disable=no-name-in-module
+from spectestrunner import GRPCLogResponse
 
 _NM = """#!/bin/sh
 echo "0000000000001000 T bsp_reset"
@@ -113,6 +119,18 @@ class _Stub:
     #: The requests received so far.
     requests = []
 
+    #: The metadata of each request received so far.
+    metadata = []
+
+    #: The stored log lines of the server.
+    log_lines = []
+
+    #: The omitted count of the stored log of the server.
+    log_omitted = 0
+
+    #: The error raised by a log request only, if any.
+    log_error = None
+
     #: The action status by action string, defaulting to success.
     action_status = {}
 
@@ -125,9 +143,10 @@ class _Stub:
     def __init__(self, _channel):
         pass
 
-    def request_run_image(self, request, timeout=None):
+    def request_run_image(self, request, timeout=None, metadata=()):
         # pylint: disable=unused-argument
         _Stub.requests.append(request)
+        _Stub.metadata.append(metadata)
         if _Stub.error is not None:
             raise _Stub.error
         if _Stub.image_error is not None:
@@ -135,16 +154,29 @@ class _Stub:
         return _Response(request.path, b"output of " + request.data,
                          _Stub.image_status)
 
-    def request_describe_target(self, request, timeout=None):
+    def request_describe_target(self, request, timeout=None, metadata=()):
         assert timeout is not None, "a description needs a deadline"
         _Stub.requests.append(request)
+        _Stub.metadata.append(metadata)
         if _Stub.error is not None:
             raise _Stub.error
         return _Description(f"description of {request.target_id}")
 
-    def request_action(self, request, timeout=None):
+    def request_log(self, request, timeout=None):
+        assert timeout is not None, "a log request needs a deadline"
+        assert request.stored, "the bridge reads the stored records"
+        _Stub.requests.append(request)
+        if _Stub.log_error is not None:
+            raise _Stub.log_error
+        for line in _Stub.log_lines:
+            yield GRPCLogResponse(data=line)
+        if _Stub.log_omitted:
+            yield GRPCLogResponse(omitted=_Stub.log_omitted)
+
+    def request_action(self, request, timeout=None, metadata=()):
         assert timeout is not None, "an action needs a deadline"
         _Stub.requests.append(request)
+        _Stub.metadata.append(metadata)
         if _Stub.error is not None:
             raise _Stub.error
         return _ActionResponse(
@@ -164,6 +196,10 @@ def _bench(tmp_path, monkeypatch):
     tools.mkdir()
     _Stub.error = None
     _Stub.requests = []
+    _Stub.metadata = []
+    _Stub.log_lines = []
+    _Stub.log_omitted = 0
+    _Stub.log_error = None
     _Stub.action_status = {}
     _Stub.image_status = "success"
     _Stub.image_error = None
@@ -1335,13 +1371,214 @@ def test_withdrawn_request_is_skipped(bench, capsys, monkeypatch):
     client = gitclient.Client(bench.hand(), bench.remote, "tester")
     run_image = _Stub.request_run_image
 
-    def _withdraw_the_other(self, request, timeout=None):
+    def _withdraw_the_other(self, request, timeout=None, metadata=()):
         if not _Stub.requests:
             other = second if request.path.endswith("a.exe") else first
             client.cleanup(other)
-        return run_image(self, request, timeout)
+        return run_image(self, request, timeout, metadata)
 
     monkeypatch.setattr(_Stub, "request_run_image", _withdraw_the_other)
     bench.bridge()
     assert len(_Stub.requests) == 1
     assert len(bench.refs()) == 2
+
+
+def _read_log_payload(**overrides):
+    payload = {
+        "version": gitproto.VERSION,
+        "kind": gitproto.KIND_READ_LOG,
+        "begin_time": 0.0,
+        "end_time": 0.0,
+        "request_id": "",
+        "max_records": 0,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _log_text(logs, source):
+    for entry in logs:
+        if entry["source"] == source:
+            return entry["output"].decode("utf-8")
+    raise AssertionError(source)
+
+
+def test_calls_carry_the_request_id(bench, capsys):
+    """ Each call of a request carries its identifier as metadata. """
+    bench.submit("--no-wait", "--action=/switch/a:status", "--image",
+                 bench.image("t.exe", b"t"))
+    request_id = capsys.readouterr().out.strip()
+    gitclient.Client(bench.hand(), bench.remote,
+                     "tester").submit_describe_target("t")
+    bench.bridge()
+    assert len(_Stub.metadata) == 3
+    assert _Stub.metadata[1] == ((logring.REQUEST_ID_METADATA, request_id), )
+    assert _Stub.metadata[2] == ((logring.REQUEST_ID_METADATA, request_id), )
+    assert _Stub.metadata[0][0][0] == logring.REQUEST_ID_METADATA
+    assert _Stub.metadata[0][0][1] != request_id
+
+
+def test_read_log_selects_the_records_of_a_request(bench, monkeypatch, caplog):
+    """
+    The bridge tags its records with the request which it processes, and a
+    read log request selects them by a prefix of the identifier.
+    """
+    caplog.set_level(logging.INFO)
+    hand = bench.hand()
+    request_id = gitclient.Client(hand, bench.remote,
+                                  "tester").submit_describe_target("t")
+    bridge = cligitbridge.Bridge(_arguments(bench))
+    bridge.tick()
+    _Stub.log_lines = ["a record of the server"]
+    _Stub.requests = []
+    monkeypatch.setattr(gitclient.time, "sleep",
+                        lambda _seconds: bridge.tick())
+    logs = gitclient.Client(hand, bench.remote, "tester", 10.0,
+                            0.0).read_log(request_id=request_id[:12])
+    assert [entry["source"] for entry in logs] == [
+        cligitbridge.LOG_SOURCE_BRIDGE, cligitbridge.LOG_SOURCE_SERVER
+    ]
+    text = _log_text(logs, cligitbridge.LOG_SOURCE_BRIDGE)
+    assert f"responded to {request_id}" in text
+    assert "tick:" not in text
+    assert _log_text(
+        logs, cligitbridge.LOG_SOURCE_SERVER) == ("a record of the server\n")
+    assert logs[1]["records"] == 1
+    assert _Stub.requests[0].request_id == request_id[:12]
+    assert len(bench.refs()) == 2
+
+
+def test_read_log_goes_first(bench, capsys):
+    """ A read log request overtakes an older run request. """
+    bench.submit("--no-wait", images=[bench.image("ticker.exe", b"one")])
+    capsys.readouterr()
+    gitclient.Client(bench.hand(), bench.remote,
+                     "tester").submit_read_log(0.0, 0.0, "", 0)
+    bench.bridge()
+    assert [type(request).__name__ for request in _Stub.requests
+            ] == ["GRPCLogRequest", "GRPCRunImageRequest"]
+
+
+def _gitlog(bench, *extra):
+    return cligitlog.cligitlog([
+        "spectestgitlog", "--remote", bench.remote, "--submitter", "tester",
+        "--poll-interval", "0.01", "--wait-timeout", "10", *extra
+    ])
+
+
+def test_gitlog_prints_the_records(bench, monkeypatch, capsys):
+    """ The command prints the records of each source and the omissions. """
+    monkeypatch.setattr(gitclient.time, "sleep",
+                        lambda _seconds: bench.bridge())
+    _Stub.log_lines = ["first", "second"]
+    _Stub.log_omitted = 7
+    assert _gitlog(bench, "--since", "2026-11-17T01:00:00+01:00", "--until",
+                   "2026-11-17T02:00:00+01:00", "--max-records",
+                   "2") == EXIT_OK
+    captured = capsys.readouterr()
+    assert "--- spectestserver ---\nfirst\nsecond\n" in captured.out
+    assert "--- spectestgitbridge ---" in captured.out
+    assert "spectestserver: the record limit omitted 7 records" in (
+        captured.err)
+    request = _Stub.requests[0]
+    assert request.begin_time == 1794873600.0
+    assert request.end_time == 1794877200.0
+    assert request.max_records == 2
+
+
+def test_gitlog_reports_an_unreachable_server(bench, monkeypatch, capsys):
+    """ A server which does not answer leaves the records of the bridge. """
+    monkeypatch.setattr(gitclient.time, "sleep",
+                        lambda _seconds: bench.bridge())
+    _Stub.log_error = _RpcError(grpc.StatusCode.UNAVAILABLE)
+    assert _gitlog(bench) == EXIT_TRANSPORT
+    captured = capsys.readouterr()
+    assert "--- spectestgitbridge ---" in captured.out
+    assert "spectestserver: StatusCode.UNAVAILABLE" in captured.err
+
+
+def test_gitlog_without_a_bridge(bench, monkeypatch, capsys):
+    """ A request without a response in time ends with the timeout. """
+    monkeypatch.setattr(gitclient.time, "sleep", lambda _seconds: None)
+    assert _gitlog(bench, "--wait-timeout", "0") == EXIT_TIMEOUT
+    assert not bench.refs()
+
+
+def test_gitlog_of_a_rejected_request(bench, monkeypatch):
+    """ A rejected read log request ends with the rejection exit code. """
+    monkeypatch.setattr(gitclient.time, "sleep",
+                        lambda _seconds: bench.discard())
+    assert _gitlog(bench) == EXIT_REJECTED
+
+
+def test_gitlog_of_a_vanished_request(bench, monkeypatch):
+    """ A request which vanished ends with the missing exit code. """
+
+    def _vanish(_seconds):
+        for ref in bench.refs():
+            gitwire.Repository(bench.remote).delete_remote_ref(
+                bench.remote, ref)
+
+    monkeypatch.setattr(gitclient.time, "sleep", _vanish)
+    assert _gitlog(bench) == EXIT_MISSING
+
+
+def _respond(bench, request_id, payload):
+    """ Push a hand crafted response to the request. """
+    repo = bench.hand()
+    message = gitproto.encode_message("spectest: crafted",
+                                      "--- spectest-response ---", payload)
+    commit = repo.commit_tree(repo.make_tree({}), message)
+    bench.push(commit, gitproto.response_ref(request_id))
+
+
+@pytest.mark.parametrize("logs", [None, ["no mapping"]])
+def test_gitlog_of_a_malformed_response(bench, monkeypatch, logs):
+    """ A response without a list of log mappings is a protocol error. """
+    payload = {
+        "version": gitproto.VERSION,
+        "status": gitproto.STATUS_COMPLETED,
+        "results": [],
+    }
+    if logs is not None:
+        payload["logs"] = logs
+
+    def _answer(_seconds):
+        for ref in bench.refs():
+            if ref.startswith(gitproto.REQUESTS_PREFIX):
+                _respond(bench, gitproto.split_request_ref(ref)[1], payload)
+
+    monkeypatch.setattr(gitclient.time, "sleep", _answer)
+    assert _gitlog(bench) == EXIT_TRANSPORT
+
+
+@pytest.mark.parametrize("overrides, reason", [
+    ({
+        "begin_time": True
+    }, "'begin_time' number"),
+    ({
+        "end_time": "now"
+    }, "'end_time' number"),
+    ({
+        "request_id": 7
+    }, "'request_id' string"),
+    ({
+        "max_records": -1
+    }, "'max_records' integer"),
+    ({
+        "max_records": False
+    }, "'max_records' integer"),
+])
+def test_malformed_read_log_is_rejected(bench, overrides, reason):
+    """ A read log request needs a valid selection. """
+    hand = bench.hand()
+    message = gitproto.encode_message("spectest: bogus",
+                                      "--- spectest-request ---",
+                                      _read_log_payload(**overrides))
+    commit = hand.commit_tree(hand.make_tree({}), message)
+    bench.push(commit, gitproto.request_ref("tester", commit))
+    bench.bridge()
+    payload = _discarded(bench, commit)
+    assert payload["status"] == gitproto.STATUS_REJECTED
+    assert reason in payload["reason"]
+    assert not _Stub.requests

@@ -25,12 +25,14 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 import argparse
+import logging
 import sys
 
 from specitems import get_arguments
 
 from spectestrunner.exitcodes import EXIT_OK
 from spectestrunner.grpcclient import run_with_service, take_stream
+from spectestrunner.logring import add_selection_arguments
 
 # pylint: disable=no-name-in-module
 from spectestrunner import GRPCLogRequest
@@ -50,6 +52,10 @@ def _get_arguments(argv: list[str]) -> argparse.Namespace:
                             help="stop after this many seconds",
                             type=float,
                             default=None)
+        parser.add_argument("--stored",
+                            help="print the stored records and exit",
+                            action="store_true")
+        add_selection_arguments(parser)
         parser.add_argument("logger_name",
                             metavar="LOGGER_NAME",
                             help="if no logger name is specified, "
@@ -65,13 +71,27 @@ def clilog(argv: list[str] = sys.argv) -> int:
     """ Get logging from a test server through gRPC. """
     args = _get_arguments(argv[1:])
 
+    # A selection exists only for the stored records.
+    stored = bool(args.stored or args.since or args.until or args.request_id
+                  or args.max_records)
+
     def _work(stub) -> int:
         # The argument has nargs="?", so it is a string and not a list.
         logger_name = args.logger_name if args.logger_name else ""
-        responses = stub.request_log(GRPCLogRequest(logger_name=logger_name),
+        responses = stub.request_log(GRPCLogRequest(
+            logger_name=logger_name,
+            stored=stored,
+            begin_time=args.since,
+            end_time=args.until,
+            request_id=args.request_id,
+            max_records=args.max_records),
                                      timeout=args.timeout)
         for response in take_stream(responses, args.max_lines):
-            print(response.data)
+            if response.omitted:
+                logging.warning("the record limit omitted %d records",
+                                response.omitted)
+            else:
+                print(response.data)
         return EXIT_OK
 
     return run_with_service(args.server_address, _work)

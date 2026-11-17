@@ -43,6 +43,10 @@ KIND_RUN_STEPS = "run-steps"
 #: The request kind which asks for the description of a target.
 KIND_DESCRIBE_TARGET = "describe-target"
 
+#: The request kind which reads the stored log records of the bridge and of
+#: the test server.
+KIND_READ_LOG = "read-log"
+
 #: The response status of a completed request.
 STATUS_COMPLETED = "completed"
 
@@ -66,6 +70,9 @@ IMAGE_DIRECTORY = "images"
 
 #: The directory of the outputs within a response commit.
 OUTPUT_DIRECTORY = "output"
+
+#: The directory of the log records within a response commit.
+LOG_DIRECTORY = "log"
 
 _REQUEST_BEGIN = "--- spectest-request ---"
 
@@ -145,6 +152,11 @@ def output_file(index: int, exe_path: str) -> str:
     return f"{OUTPUT_DIRECTORY}/{index:04d}-{name}.out"
 
 
+def log_file(source: str) -> str:
+    """ Return the path of the log records of the source. """
+    return f"{LOG_DIRECTORY}/{sanitize_ref_component(source)}.log"
+
+
 def encode_message(subject: str, marker: str, payload: dict[str, Any]) -> str:
     """ Return a commit message with the payload embedded as YAML. """
     document = yaml.safe_dump(payload,
@@ -216,6 +228,25 @@ def encode_describe_target_request(submitter: str, target: str) -> str:
         })
 
 
+def encode_read_log_request(submitter: str, begin_time: float, end_time: float,
+                            request_id: str, max_records: int) -> str:
+    """
+    Return the commit message of a read log request.  The nonce has the
+    purpose of the one of a run steps request.
+    """
+    return encode_message(
+        "spectest: request the log records", _REQUEST_BEGIN, {
+            "version": VERSION,
+            "kind": KIND_READ_LOG,
+            "submitter": submitter,
+            "nonce": secrets.token_hex(_NONCE_BYTES),
+            "begin_time": begin_time,
+            "end_time": end_time,
+            "request_id": request_id,
+            "max_records": max_records,
+        })
+
+
 def decode_request(message: str) -> dict[str, Any]:
     """ Return the request payload of the commit message. """
     payload = decode_message(message, _REQUEST_BEGIN)
@@ -253,6 +284,21 @@ def check_describe_target_request(payload: dict[str, Any]) -> None:
     """ Raise a protocol error if the describe target request is malformed. """
     if not isinstance(payload.get("target"), str):
         raise ProtocolError("the request has no 'target' string")
+
+
+def check_read_log_request(payload: dict[str, Any]) -> None:
+    """ Raise a protocol error if the read log request is malformed. """
+    for key in ("begin_time", "end_time"):
+        if isinstance(payload.get(key),
+                      bool) or not isinstance(payload.get(key), (int, float)):
+            raise ProtocolError(f"the request has no '{key}' number")
+    if not isinstance(payload.get("request_id"), str):
+        raise ProtocolError("the request has no 'request_id' string")
+    max_records = payload.get("max_records")
+    if isinstance(max_records,
+                  bool) or not isinstance(max_records, int) or max_records < 0:
+        raise ProtocolError(
+            "the request has no non-negative 'max_records' integer")
 
 
 def check_run_steps_request(payload: dict[str, Any]) -> None:
